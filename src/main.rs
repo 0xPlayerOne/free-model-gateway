@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use dialoguer::{Confirm, Input, Password, Select};
 
 use model_gateway::config::{Config, Exposure, ModelConfig, TargetConfig};
+use model_gateway::gateway::run_server;
 use model_gateway::providers::{BuiltinProvider, fetch_models};
 use model_gateway::secrets::SecretResolver;
 
@@ -53,7 +54,8 @@ enum CredentialCommand {
     List,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     match cli.command {
         Command::Setup(args) => setup(args)?,
@@ -61,12 +63,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             command: ConfigCommand::Check,
         } => config_check()?,
         Command::Credentials { command } => credentials(command)?,
-        Command::Serve => {
-            println!(
-                "gateway server is added in the next milestone; run `model-gateway setup` first"
-            );
-        }
+        Command::Serve => serve().await?,
     }
+    Ok(())
+}
+
+async fn serve() -> Result<(), Box<dyn Error>> {
+    let path = Config::default_path();
+    let resolver = SecretResolver::default();
+    let config = Config::load(&path, &resolver)?;
+    println!("Serving model gateway on {}", config.server.bind);
+    run_server(config, &resolver).await?;
     Ok(())
 }
 

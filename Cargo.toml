@@ -15,13 +15,18 @@ name = "model-gateway"
 path = "src/main.rs"
 
 [dependencies]
+axum = "0.8"
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 dialoguer = "0.11"
+futures-util = "0.3"
 keyring = { version = "3.6", features = ["apple-native", "linux-native"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["limit"] }
 toml = "0.9"
 url = "2"
 
