@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::body::{Body, Bytes};
 use axum::extract::Json;
@@ -399,6 +400,147 @@ async fn active_stream_has_no_total_response_header_deadline() {
         .await
         .expect("stream body");
     assert!(body.contains("data: [DONE]"));
+}
+
+#[tokio::test]
+async fn preserves_multimodal_and_unknown_fields_for_each_target() {
+    let router = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            Json(json!({"model": body["model"], "echo": body}))
+        }),
+    );
+    let provider_address = spawn_router(router).await;
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([(
+            "local".to_owned(),
+            provider(format!("http://{provider_address}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "local".to_owned(),
+            model: "upstream-model".to_owned(),
+        }],
+    ))
+    .await;
+    let response: Value = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "smoke",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}}
+                ]
+            }],
+            "vendor_extension": {"preserve": [1, 2, 3]}
+        }))
+        .send()
+        .await
+        .expect("multimodal response")
+        .json()
+        .await
+        .expect("multimodal json");
+    assert_eq!(response["model"], "upstream-model");
+    assert_eq!(
+        response["echo"]["messages"][0]["content"][1]["type"],
+        "image_url"
+    );
+    assert_eq!(
+        response["echo"]["vendor_extension"],
+        json!({"preserve": [1, 2, 3]})
+    );
+}
+
+#[tokio::test]
+async fn transport_failure_does_not_fallback() {
+    let unavailable = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("temporary bind")
+        .local_addr()
+        .expect("temporary address");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fallback_calls = calls.clone();
+    let fallback = spawn_router(Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let calls = fallback_calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"unexpected": true}))
+            }
+        }),
+    ))
+    .await;
+    let gateway = spawn_gateway(config_for(
+        BTreeMap::from([
+            (
+                "unavailable".to_owned(),
+                provider(format!("http://{unavailable}/v1")),
+            ),
+            (
+                "fallback".to_owned(),
+                provider(format!("http://{fallback}/v1")),
+            ),
+        ]),
+        vec![
+            TargetConfig {
+                provider: "unavailable".to_owned(),
+                model: "first".to_owned(),
+            },
+            TargetConfig {
+                provider: "fallback".to_owned(),
+                model: "second".to_owned(),
+            },
+        ],
+    ))
+    .await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "smoke", "messages": []}))
+        .send()
+        .await
+        .expect("transport response");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        response.headers()["x-model-gateway-provider"],
+        "unavailable"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn client_disconnect_releases_stream_permit() {
+    let provider_address = spawn_provider(ProviderResponse::HoldStream).await;
+    let mut config = config_for(
+        BTreeMap::from([(
+            "local".to_owned(),
+            provider(format!("http://{provider_address}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "local".to_owned(),
+            model: "upstream-model".to_owned(),
+        }],
+    );
+    config.server.max_in_flight = 1;
+    config.server.admission_timeout_ms = 500;
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "smoke", "stream": true, "messages": []}))
+        .send()
+        .await
+        .expect("first stream");
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let second = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "smoke", "stream": true, "messages": []}))
+        .send()
+        .await
+        .expect("second stream");
+    assert_eq!(second.status(), StatusCode::OK);
 }
 
 #[tokio::test]

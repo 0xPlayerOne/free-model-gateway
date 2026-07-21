@@ -137,6 +137,10 @@ pub fn fetch_models(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
     use super::BuiltinProvider;
 
     #[test]
@@ -148,5 +152,72 @@ mod tests {
         );
         assert!(BuiltinProvider::OpenRouter.needs_api_key());
         assert!(!BuiltinProvider::LmStudio.needs_api_key());
+    }
+
+    #[test]
+    fn docker_profiles_use_explicit_host_gateway_and_insecure_opt_in() {
+        let url = BuiltinProvider::Ollama.default_base_url(true);
+        assert_eq!(url, "http://host.docker.internal:11434/v1");
+        let config = BuiltinProvider::Ollama.config(url.to_owned(), None);
+        assert!(config.allow_insecure_http);
+    }
+
+    #[test]
+    fn openrouter_validates_key_before_catalog_discovery() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock bind");
+        let address = listener.local_addr().expect("mock address");
+        let server = thread::spawn(move || {
+            for expected_path in ["/v1/auth/key", "/v1/models"] {
+                let (mut socket, _) = listener.accept().expect("mock accept");
+                let mut request = vec![0; 4096];
+                let size = socket.read(&mut request).expect("mock read");
+                let request = String::from_utf8_lossy(&request[..size]);
+                assert!(request.starts_with(&format!("GET {expected_path} ")));
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer valid-key")
+                );
+                let body = if expected_path.ends_with("models") {
+                    r#"{"data":[{"id":"fixture-model"}]}"#
+                } else {
+                    r#"{"data":{"label":"fixture"}}"#
+                };
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("mock write");
+            }
+        });
+        let provider = BuiltinProvider::OpenRouter.config(format!("http://{address}/v1"), None);
+        let models = BuiltinProvider::OpenRouter
+            .validate_and_fetch_models(&provider, Some("valid-key"))
+            .expect("validated models");
+        assert_eq!(models, vec!["fixture-model"]);
+        server.join().expect("mock server");
+    }
+
+    #[test]
+    fn openrouter_rejects_invalid_key_without_catalog_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock bind");
+        let address = listener.local_addr().expect("mock address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("mock accept");
+            let mut request = vec![0; 4096];
+            let _ = socket.read(&mut request).expect("mock read");
+            write!(
+                socket,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("mock write");
+        });
+        let provider = BuiltinProvider::OpenRouter.config(format!("http://{address}/v1"), None);
+        let error = BuiltinProvider::OpenRouter
+            .validate_and_fetch_models(&provider, Some("invalid-key"))
+            .expect_err("invalid key");
+        assert!(error.contains("401"));
+        server.join().expect("mock server");
     }
 }
