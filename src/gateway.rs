@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::BytesRejection;
@@ -187,10 +187,20 @@ async fn chat_completions(
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let started_at = Instant::now();
     let request_id = request_id(&headers);
     let body = match body {
         Ok(body) => body,
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            log_request(
+                &request_id,
+                "",
+                "",
+                StatusCode::PAYLOAD_TOO_LARGE,
+                started_at,
+                false,
+                0,
+            );
             return error_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 request_id,
@@ -200,6 +210,15 @@ async fn chat_completions(
             );
         }
         Err(_) => {
+            log_request(
+                &request_id,
+                "",
+                "",
+                StatusCode::BAD_REQUEST,
+                started_at,
+                false,
+                0,
+            );
             return error_response(
                 StatusCode::BAD_REQUEST,
                 request_id,
@@ -212,6 +231,15 @@ async fn chat_completions(
     let request: Value = match serde_json::from_slice::<Value>(&body) {
         Ok(value) if value.is_object() => value,
         Ok(_) => {
+            log_request(
+                &request_id,
+                "",
+                "",
+                StatusCode::BAD_REQUEST,
+                started_at,
+                false,
+                0,
+            );
             return error_response(
                 StatusCode::BAD_REQUEST,
                 request_id,
@@ -221,6 +249,15 @@ async fn chat_completions(
             );
         }
         Err(_) => {
+            log_request(
+                &request_id,
+                "",
+                "",
+                StatusCode::BAD_REQUEST,
+                started_at,
+                false,
+                0,
+            );
             return error_response(
                 StatusCode::BAD_REQUEST,
                 request_id,
@@ -233,6 +270,15 @@ async fn chat_completions(
     let model = match request.get("model").and_then(Value::as_str) {
         Some(model) if !model.is_empty() => model.to_owned(),
         _ => {
+            log_request(
+                &request_id,
+                "",
+                "",
+                StatusCode::BAD_REQUEST,
+                started_at,
+                false,
+                0,
+            );
             return error_response(
                 StatusCode::BAD_REQUEST,
                 request_id,
@@ -246,6 +292,15 @@ async fn chat_completions(
         None => false,
         Some(Value::Bool(value)) => *value,
         Some(_) => {
+            log_request(
+                &request_id,
+                &model,
+                "",
+                StatusCode::BAD_REQUEST,
+                started_at,
+                false,
+                0,
+            );
             return error_response(
                 StatusCode::BAD_REQUEST,
                 request_id,
@@ -258,6 +313,7 @@ async fn chat_completions(
     let targets = match resolve_targets(&state, &model) {
         Ok(targets) => targets,
         Err((status, message, code)) => {
+            log_request(&request_id, &model, "", status, started_at, is_stream, 0);
             return error_response(
                 status,
                 request_id,
@@ -275,6 +331,15 @@ async fn chat_completions(
     {
         Ok(Ok(permit)) => permit,
         _ => {
+            log_request(
+                &request_id,
+                &model,
+                "",
+                StatusCode::TOO_MANY_REQUESTS,
+                started_at,
+                is_stream,
+                0,
+            );
             return admission_error(
                 request_id,
                 "gateway is at capacity",
@@ -305,6 +370,15 @@ async fn chat_completions(
         {
             Ok(Ok(permit)) => permit,
             _ => {
+                log_request(
+                    &request_id,
+                    &model,
+                    &target.provider,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    started_at,
+                    is_stream,
+                    attempts.saturating_sub(1),
+                );
                 return admission_error(
                     request_id,
                     "provider is at capacity",
@@ -333,22 +407,42 @@ async fn chat_completions(
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 drop(provider_permit);
-                return error_response(
+                log_request(
+                    &request_id,
+                    &model,
+                    &target.provider,
+                    StatusCode::BAD_GATEWAY,
+                    started_at,
+                    is_stream,
+                    attempts.saturating_sub(1),
+                );
+                return selected_error_response(
                     StatusCode::BAD_GATEWAY,
                     request_id,
                     "upstream request failed",
-                    "upstream_error",
-                    None,
+                    &model,
+                    &target.provider,
+                    attempts,
                 );
             }
             Err(_) => {
                 drop(provider_permit);
-                return error_response(
+                log_request(
+                    &request_id,
+                    &model,
+                    &target.provider,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    started_at,
+                    is_stream,
+                    attempts.saturating_sub(1),
+                );
+                return selected_error_response(
                     StatusCode::GATEWAY_TIMEOUT,
                     request_id,
                     "upstream response headers timed out",
-                    "upstream_error",
-                    None,
+                    &model,
+                    &target.provider,
+                    attempts,
                 );
             }
         };
@@ -366,6 +460,7 @@ async fn chat_completions(
                     attempts,
                     idle_timeout_seconds: provider.config.stream_idle_timeout_seconds,
                     is_stream,
+                    started_at,
                     global_permit,
                     provider_permit,
                 },
@@ -381,6 +476,15 @@ async fn chat_completions(
             Err(_) if is_fallback_status(status) => Bytes::new(),
             Err(_) => {
                 drop(provider_permit);
+                log_request(
+                    &request_id,
+                    &model,
+                    &target.provider,
+                    StatusCode::BAD_GATEWAY,
+                    started_at,
+                    is_stream,
+                    attempts.saturating_sub(1),
+                );
                 return selected_error_response(
                     StatusCode::BAD_GATEWAY,
                     request_id,
@@ -393,6 +497,15 @@ async fn chat_completions(
         };
         drop(provider_permit);
         if !is_fallback_status(status) {
+            log_request(
+                &request_id,
+                &model,
+                &target.provider,
+                status,
+                started_at,
+                is_stream,
+                attempts.saturating_sub(1),
+            );
             return upstream_error_response(
                 status,
                 response_headers,
@@ -403,6 +516,14 @@ async fn chat_completions(
                 attempts,
             );
         }
+        tracing::warn!(
+            request_id = %request_id,
+            alias = %model,
+            provider = %target.provider,
+            attempt = attempts,
+            status = status.as_u16(),
+            "upstream fallback"
+        );
         last_error = Some((
             status,
             response_headers,
@@ -410,7 +531,7 @@ async fn chat_completions(
             target.provider.clone(),
         ));
     }
-    match last_error {
+    let response = match last_error {
         Some((status, headers, body, provider)) if !body.is_empty() => upstream_error_response(
             status, headers, body, request_id, &model, &provider, attempts,
         ),
@@ -429,7 +550,21 @@ async fn chat_completions(
             "upstream_error",
             None,
         ),
-    }
+    };
+    log_request(
+        &request_id_from_response(&response),
+        &model,
+        response
+            .headers()
+            .get("x-model-gateway-provider")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or(""),
+        response.status(),
+        started_at,
+        is_stream,
+        attempts.saturating_sub(1),
+    );
+    response
 }
 
 #[allow(clippy::single_match)]
@@ -498,6 +633,7 @@ struct StreamContext {
     attempts: usize,
     idle_timeout_seconds: u64,
     is_stream: bool,
+    started_at: Instant,
     global_permit: tokio::sync::OwnedSemaphorePermit,
     provider_permit: tokio::sync::OwnedSemaphorePermit,
 }
@@ -515,10 +651,20 @@ fn relay_response(
         provider,
         attempts,
         is_stream,
+        started_at,
         global_permit,
         provider_permit,
         ..
     } = context;
+    let request_log = RequestLog {
+        request_id: request_id.clone(),
+        alias: alias.clone(),
+        provider: provider.clone(),
+        status,
+        started_at,
+        is_stream,
+        fallbacks: attempts.saturating_sub(1),
+    };
     let mut upstream = response.bytes_stream();
     let stream = async_stream::stream! {
         loop {
@@ -540,6 +686,7 @@ fn relay_response(
         }
         drop(provider_permit);
         drop(global_permit);
+        drop(request_log);
     };
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
@@ -557,6 +704,60 @@ fn relay_response(
             .insert("x-accel-buffering", HeaderValue::from_static("no"));
     }
     response
+}
+
+struct RequestLog {
+    request_id: String,
+    alias: String,
+    provider: String,
+    status: StatusCode,
+    started_at: Instant,
+    is_stream: bool,
+    fallbacks: usize,
+}
+
+impl Drop for RequestLog {
+    fn drop(&mut self) {
+        log_request(
+            &self.request_id,
+            &self.alias,
+            &self.provider,
+            self.status,
+            self.started_at,
+            self.is_stream,
+            self.fallbacks,
+        );
+    }
+}
+
+fn log_request(
+    request_id: &str,
+    alias: &str,
+    provider: &str,
+    status: StatusCode,
+    started_at: Instant,
+    is_stream: bool,
+    fallbacks: usize,
+) {
+    tracing::info!(
+        request_id,
+        alias,
+        provider,
+        status_class = status.as_u16() / 100,
+        latency_ms = started_at.elapsed().as_millis() as u64,
+        stream = is_stream,
+        fallback_count = fallbacks,
+        "request complete"
+    );
+}
+
+fn request_id_from_response(response: &Response) -> String {
+    response
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("invalid")
+        .to_owned()
 }
 
 fn upstream_error_response(
@@ -691,8 +892,37 @@ fn error_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_fallback_status, request_id};
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    use super::{is_fallback_status, log_request, request_id};
     use axum::http::{HeaderMap, StatusCode};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct TestWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct TestGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for TestGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for TestWriter {
+        type Writer = TestGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            TestGuard(self.0.clone())
+        }
+    }
 
     #[test]
     fn fallback_statuses_are_explicit() {
@@ -708,5 +938,40 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-request-id", "client-request".parse().expect("header"));
         assert_eq!(request_id(&headers), "client-request");
+    }
+
+    #[test]
+    fn completion_logs_use_a_fixed_body_free_schema() {
+        let writer = TestWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        log_request(
+            "request-id",
+            "public-alias",
+            "provider-name",
+            StatusCode::OK,
+            Instant::now(),
+            true,
+            2,
+        );
+        let output = String::from_utf8(writer.0.lock().expect("log buffer").clone())
+            .expect("utf8 log output");
+        for field in [
+            "request_id",
+            "alias",
+            "provider",
+            "status_class",
+            "latency_ms",
+            "stream",
+            "fallback_count",
+        ] {
+            assert!(output.contains(field), "missing {field}: {output}");
+        }
+        assert!(!output.contains("messages"));
+        assert!(!output.contains("authorization"));
+        assert!(!output.contains("tool_calls"));
     }
 }

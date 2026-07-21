@@ -4,6 +4,8 @@ use std::io::{self, Write};
 
 use clap::{Args, Parser, Subcommand};
 use dialoguer::{Confirm, Input, Password, Select};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
 
 use model_gateway::config::{Config, ConfigError, Exposure, ModelConfig, TargetConfig};
 use model_gateway::gateway::run_server;
@@ -57,6 +59,7 @@ enum CredentialCommand {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    init_logging()?;
     let cli = Cli::parse();
     match cli.command {
         Command::Setup(args) => setup(args)?,
@@ -65,6 +68,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } => config_check()?,
         Command::Credentials { command } => credentials(command)?,
         Command::Serve => serve().await?,
+    }
+    Ok(())
+}
+
+fn init_logging() -> Result<(), Box<dyn Error>> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let registry = tracing_subscriber::registry().with(filter);
+    if std::env::var("MODEL_GATEWAY_LOG_FORMAT").as_deref() == Ok("json") {
+        registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .try_init()?;
+    } else {
+        registry.with(tracing_subscriber::fmt::layer()).try_init()?;
     }
     Ok(())
 }
