@@ -1,11 +1,55 @@
 # model-gateway
 
 Local Rust model gateway for routing OpenAI-compatible clients to configured
-model providers.
+model providers. It is designed for one developer running locally, not as a
+hosted service.
 
-The project is being built incrementally. The initial repository commit is a
-clean Rust package; gateway configuration, secure local credentials, provider
-adapters, Docker, and Hermes compatibility are added in focused commits.
+## Native quickstart
+
+```bash
+cargo run -- setup
+cargo run -- serve
+```
+
+`setup` stores provider keys in the macOS Keychain or Linux Secret Service and
+writes only non-secret routing configuration under
+`~/.config/model-gateway/config.toml`. Use `--offline` to skip catalog checks.
+
+Hermes can use the gateway as a custom endpoint:
+
+```yaml
+model:
+  provider: custom
+  base_url: http://127.0.0.1:11434/v1
+  default: <alias-from-setup>
+```
+
+## Docker quickstart
+
+Create the ignored config mount, then run the interactive setup container:
+
+```bash
+mkdir -p .model-gateway
+touch .model-gateway/config.toml
+docker compose --profile setup run --rm setup
+docker compose up --build gateway
+```
+
+The provider secrets live in a Docker named volume mounted read-only by the
+server. The host port is fixed to `127.0.0.1:11434`; do not broaden it without
+designing caller authentication. `docker compose down -v` deletes the local
+credential volume.
+
+For Ollama or LM Studio on the host, configure the endpoint as
+`http://host.docker.internal:<port>/v1` from the setup container. Container
+`localhost` is not the host machine.
+
+## Verification
+
+```bash
+curl http://127.0.0.1:11434/health/live
+curl http://127.0.0.1:11434/v1/models
+```
 
 ## Development
 

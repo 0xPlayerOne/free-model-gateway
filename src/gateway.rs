@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,6 +65,15 @@ struct ErrorBody {
 }
 
 pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, GatewayBuildError> {
+    if config.server.exposure == crate::config::Exposure::LocalContainer
+        && env::var("MODEL_GATEWAY_CONTAINER_MODE").as_deref() != Ok("1")
+    {
+        return Err(GatewayBuildError::Config(
+            crate::config::ConfigError::Invalid(
+                "local_container exposure requires MODEL_GATEWAY_CONTAINER_MODE=1".to_owned(),
+            ),
+        ));
+    }
     config.validate(secrets)?;
     let mut providers = BTreeMap::new();
     for (name, provider) in &config.providers {
