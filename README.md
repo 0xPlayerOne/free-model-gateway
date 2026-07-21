@@ -69,11 +69,5 @@ cargo run -- --help
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 only
-(AGPL-3.0-only). Anyone may use, study, fork, and modify it under that license.
-Attribution and source-sharing obligations apply, including when a modified
-gateway is offered over a network. The AGPL does not require payment, because a
-mandatory commercial-use fee would not be an open-source license. Proprietary
-commercial terms would require a separate license from the copyright holders.
-
-See `LICENSE` and `NOTICE`.
+This project is dual-licensed under the MIT License or Apache License 2.0, at
+your option. See `LICENSE-MIT` and `LICENSE-APACHE`.
