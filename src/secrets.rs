@@ -16,6 +16,8 @@ pub enum SecretError {
     Io(#[from] std::io::Error),
     #[error("keychain operation failed: {0}")]
     Keychain(String),
+    #[error("invalid MODEL_GATEWAY_SECRET_STORE value: {0}")]
+    InvalidStore(String),
 }
 
 pub trait SecretStore: Send + Sync {
@@ -163,25 +165,67 @@ impl SecretStore for KeychainSecretStore {
     }
 }
 
-#[derive(Debug)]
 pub struct SecretResolver {
     pub environment: EnvironmentSecretStore,
-    pub files: Option<FileSecretStore>,
-    pub keychain: Option<KeychainSecretStore>,
+    files: Option<Box<dyn SecretStore>>,
+    keychain: Option<Box<dyn SecretStore>>,
+    initialization_error: Option<String>,
 }
 
 impl Default for SecretResolver {
     fn default() -> Self {
+        let mode = env::var("MODEL_GATEWAY_SECRET_STORE").ok();
+        let configured_files = env::var_os("MODEL_GATEWAY_SECRET_DIR")
+            .map(|path| Box::new(FileSecretStore::new(path)) as Box<dyn SecretStore>);
+        let (files, keychain, initialization_error) =
+            match mode.as_deref() {
+                None | Some("keychain") => (
+                    configured_files,
+                    Some(Box::new(KeychainSecretStore) as Box<dyn SecretStore>),
+                    None,
+                ),
+                Some("file") => (
+                    Some(configured_files.unwrap_or_else(|| {
+                        Box::new(FileSecretStore::new(default_file_store_root()))
+                    })),
+                    None,
+                    None,
+                ),
+                Some("environment") => (None, None, None),
+                Some(value) => (None, None, Some(value.to_owned())),
+            };
         Self {
             environment: EnvironmentSecretStore,
-            files: env::var_os("MODEL_GATEWAY_SECRET_DIR").map(FileSecretStore::new),
-            keychain: Some(KeychainSecretStore),
+            files,
+            keychain,
+            initialization_error,
         }
     }
 }
 
 impl SecretResolver {
+    #[cfg(test)]
+    fn with_stores(
+        files: Option<Box<dyn SecretStore>>,
+        keychain: Option<Box<dyn SecretStore>>,
+    ) -> Self {
+        Self {
+            environment: EnvironmentSecretStore,
+            files,
+            keychain,
+            initialization_error: None,
+        }
+    }
+
+    fn check_initialized(&self) -> Result<(), SecretError> {
+        match &self.initialization_error {
+            Some(value) => Err(SecretError::InvalidStore(value.clone())),
+            None => Ok(()),
+        }
+    }
+
     pub fn get(&self, name: &str) -> Result<Option<String>, SecretError> {
+        self.check_initialized()?;
         if let Some(value) = self.environment.get(name)? {
             return Ok(Some(value));
         }
@@ -199,6 +243,7 @@ impl SecretResolver {
     }
 
     pub fn source(&self, name: &str) -> Result<Option<&'static str>, SecretError> {
+        self.check_initialized()?;
         if self.environment.get(name)?.is_some() {
             return Ok(Some(self.environment.source()));
         }
@@ -220,20 +265,26 @@ impl SecretResolver {
     }
 
     pub fn set_preferred(&self, name: &str, value: &str) -> Result<&'static str, SecretError> {
+        self.check_initialized()?;
         if let Some(files) = &self.files {
             files.set(name, value)?;
             return Ok(files.source());
         }
         if let Some(keychain) = &self.keychain {
-            keychain.set(name, value)?;
+            keychain.set(name, value).map_err(|error| {
+                SecretError::Keychain(format!(
+                    "{error}; choose MODEL_GATEWAY_SECRET_STORE=file or environment explicitly"
+                ))
+            })?;
             return Ok(keychain.source());
         }
         Err(SecretError::Keychain(
-            "no writable secret store is configured".to_owned(),
+            "environment-only mode cannot persist credentials; export the named variable or choose MODEL_GATEWAY_SECRET_STORE=file".to_owned(),
         ))
     }
 
     pub fn remove(&self, name: &str) -> Result<(), SecretError> {
+        self.check_initialized()?;
         if let Some(files) = &self.files {
             files.remove(name)?;
         }
@@ -242,6 +293,18 @@ impl SecretResolver {
         }
         Ok(())
     }
+}
+
+fn default_file_store_root() -> PathBuf {
+    if let Some(path) = env::var_os("MODEL_GATEWAY_HOME") {
+        return PathBuf::from(path).join("secrets");
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
+        .join("model-gateway")
+        .join("secrets")
 }
 
 pub fn validate_secret_name(name: &str) -> Result<(), SecretError> {
@@ -268,7 +331,38 @@ fn set_unix_mode(path: &Path, mode: u32) -> Result<(), SecretError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileSecretStore, SecretStore, validate_secret_name};
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use super::{FileSecretStore, SecretError, SecretResolver, SecretStore, validate_secret_name};
+
+    #[derive(Default)]
+    struct FakeSecretStore {
+        values: Mutex<BTreeMap<String, String>>,
+    }
+
+    impl SecretStore for FakeSecretStore {
+        fn get(&self, name: &str) -> Result<Option<String>, SecretError> {
+            Ok(self.values.lock().expect("fake lock").get(name).cloned())
+        }
+
+        fn set(&self, name: &str, value: &str) -> Result<(), SecretError> {
+            self.values
+                .lock()
+                .expect("fake lock")
+                .insert(name.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn remove(&self, name: &str) -> Result<(), SecretError> {
+            self.values.lock().expect("fake lock").remove(name);
+            Ok(())
+        }
+
+        fn source(&self) -> &'static str {
+            "fake-keychain"
+        }
+    }
 
     #[test]
     fn rejects_path_traversal_names() {
@@ -287,5 +381,72 @@ mod tests {
         );
         store.remove("TEST_KEY").expect("remove");
         assert_eq!(store.get("TEST_KEY").expect("get"), None);
+    }
+
+    #[test]
+    fn resolver_uses_files_before_keychain() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let files = FileSecretStore::new(directory.path());
+        files
+            .set("RESOLVER_TEST_KEY", "file-value")
+            .expect("file set");
+        let keychain = FakeSecretStore::default();
+        keychain
+            .set("RESOLVER_TEST_KEY", "keychain-value")
+            .expect("keychain set");
+        let resolver = SecretResolver::with_stores(Some(Box::new(files)), Some(Box::new(keychain)));
+        assert_eq!(
+            resolver.get("RESOLVER_TEST_KEY").expect("resolve"),
+            Some("file-value".to_owned())
+        );
+        assert_eq!(
+            resolver.source("RESOLVER_TEST_KEY").expect("source"),
+            Some("protected-file")
+        );
+    }
+
+    #[test]
+    fn fake_keychain_supports_set_get_and_remove() {
+        let resolver =
+            SecretResolver::with_stores(None, Some(Box::new(FakeSecretStore::default())));
+        assert_eq!(
+            resolver
+                .set_preferred("FAKE_KEYCHAIN_TEST", "value")
+                .expect("set"),
+            "fake-keychain"
+        );
+        assert_eq!(
+            resolver.get("FAKE_KEYCHAIN_TEST").expect("get"),
+            Some("value".to_owned())
+        );
+        resolver.remove("FAKE_KEYCHAIN_TEST").expect("remove");
+        assert_eq!(resolver.get("FAKE_KEYCHAIN_TEST").expect("get"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_store_enforces_directory_and_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("secrets");
+        let store = FileSecretStore::new(&root);
+        store.set("PERMISSIONS_TEST", "value").expect("set");
+        assert_eq!(
+            std::fs::metadata(&root)
+                .expect("root metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(root.join("PERMISSIONS_TEST"))
+                .expect("secret metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 }
