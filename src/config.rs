@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::net::IpAddr;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -202,15 +204,30 @@ impl Config {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            }
         }
         let temporary = path.with_extension("toml.tmp");
-        fs::write(&temporary, self.to_toml()?)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
         }
+        file.write_all(self.to_toml()?.as_bytes())?;
+        file.sync_all()?;
         fs::rename(temporary, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            OpenOptions::new().read(true).open(parent)?.sync_all()?;
+        }
         Ok(())
     }
 
@@ -240,9 +257,13 @@ fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
             "only loopback binds are supported outside local_container exposure".to_owned(),
         ));
     }
-    if server.max_body_bytes == 0 || server.max_in_flight == 0 {
+    if server.max_body_bytes == 0
+        || server.max_in_flight == 0
+        || server.admission_timeout_ms == 0
+        || server.shutdown_grace_seconds == 0
+    {
         return Err(ConfigError::Invalid(
-            "server body and concurrency limits must be greater than zero".to_owned(),
+            "server limits and timeouts must be greater than zero".to_owned(),
         ));
     }
     Ok(())
@@ -255,10 +276,25 @@ fn validate_provider(
 ) -> Result<(), ConfigError> {
     let url = Url::parse(&provider.base_url)
         .map_err(|error| ConfigError::Invalid(format!("provider '{name}' URL: {error}")))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ConfigError::Invalid(format!(
+            "provider '{name}' URL must not contain credentials"
+        )));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(ConfigError::Invalid(format!(
+            "provider '{name}' base URL must not contain a query or fragment"
+        )));
+    }
     match url.scheme() {
         "https" => {}
         "http" if is_loopback_host(url.host_str()) => {}
-        "http" if provider.allow_insecure_http => {}
+        "http" if provider.allow_insecure_http && is_private_host(url.host_str()) => {}
+        "http" if provider.allow_insecure_http => {
+            return Err(ConfigError::Invalid(format!(
+                "provider '{name}' public HTTP URL is not allowed"
+            )));
+        }
         scheme => {
             return Err(ConfigError::Invalid(format!(
                 "provider '{name}' must use HTTPS or explicitly allow loopback/insecure HTTP, got {scheme}"
@@ -284,7 +320,7 @@ fn validate_provider(
         )));
     }
     for (header, value) in &provider.extra_headers {
-        if !is_safe_extra_header(header) || value.contains('\r') || value.contains('\n') {
+        if !is_safe_extra_header(header) || reqwest::header::HeaderValue::try_from(value).is_err() {
             return Err(ConfigError::Invalid(format!(
                 "provider '{name}' contains unsafe extra header '{header}'"
             )));
@@ -304,9 +340,35 @@ fn validate_provider(
 fn is_loopback_host(host: Option<&str>) -> bool {
     match host {
         Some("localhost") => true,
-        Some(host) => host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()),
+        Some(host) => host
+            .trim_matches(['[', ']'])
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
         None => false,
     }
+}
+
+fn is_private_host(host: Option<&str>) -> bool {
+    match host {
+        Some("host.docker.internal") => true,
+        Some(host) => match host.trim_matches(['[', ']']).parse::<IpAddr>() {
+            Ok(IpAddr::V4(ip)) => is_private_ipv4(ip),
+            Ok(IpAddr::V6(ip)) => is_private_ipv6(ip),
+            Err(_) => false,
+        },
+        None => false,
+    }
+}
+
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_private()
+        || ip.is_link_local()
+        || ip.is_loopback()
+        || matches!(ip.octets(), [100, 64..=127, _, _])
+}
+
+fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
 }
 
 fn is_safe_extra_header(header: &str) -> bool {
@@ -315,7 +377,17 @@ fn is_safe_extra_header(header: &str) -> bool {
         && !lower.starts_with("proxy-")
         && !matches!(
             lower.as_str(),
-            "authorization" | "host" | "content-length" | "transfer-encoding" | "connection"
+            "authorization"
+                | "proxy-authorization"
+                | "host"
+                | "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "cookie"
+                | "set-cookie"
+                | "x-api-key"
+                | "api-key"
+                | "x-auth-token"
         )
         && header
             .bytes()
@@ -366,7 +438,9 @@ const fn default_stream_idle_timeout_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Exposure, ProviderConfig, ServerConfig, validate_server};
+    use super::{
+        Config, Exposure, ModelConfig, ProviderConfig, ServerConfig, TargetConfig, validate_server,
+    };
     use crate::secrets::SecretResolver;
     use std::collections::BTreeMap;
 
@@ -382,6 +456,22 @@ mod tests {
             connect_timeout_seconds: 10,
             response_header_timeout_seconds: 300,
             stream_idle_timeout_seconds: 180,
+        }
+    }
+
+    fn valid_config(base_url: &str) -> Config {
+        Config {
+            server: ServerConfig::default(),
+            providers: BTreeMap::from([("local".to_owned(), provider(base_url))]),
+            models: BTreeMap::from([(
+                "local-model".to_owned(),
+                ModelConfig {
+                    targets: vec![TargetConfig {
+                        provider: "local".to_owned(),
+                        model: "upstream-model".to_owned(),
+                    }],
+                },
+            )]),
         }
     }
 
@@ -415,5 +505,109 @@ mod tests {
             },
         );
         assert!(config.validate(&SecretResolver::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_configuration_fields() {
+        let error = toml::from_str::<Config>("unknown = true").expect_err("unknown field");
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn rejects_public_http_even_when_insecure_http_is_enabled() {
+        let mut config = valid_config("http://example.com/v1");
+        config
+            .providers
+            .get_mut("local")
+            .expect("provider")
+            .allow_insecure_http = true;
+        assert!(config.validate(&SecretResolver::default()).is_err());
+    }
+
+    #[test]
+    fn permits_explicit_private_and_docker_http() {
+        for url in [
+            "http://192.168.1.10:11434/v1",
+            "http://100.64.0.1:11434/v1",
+            "http://[fd00::1]:11434/v1",
+            "http://host.docker.internal:11434/v1",
+        ] {
+            let mut config = valid_config(url);
+            config
+                .providers
+                .get_mut("local")
+                .expect("provider")
+                .allow_insecure_http = true;
+            config
+                .validate(&SecretResolver::default())
+                .unwrap_or_else(|error| panic!("{url} should be allowed: {error}"));
+        }
+    }
+
+    #[test]
+    fn rejects_credentials_queries_and_sensitive_headers() {
+        for url in [
+            "https://user:password@example.com/v1",
+            "https://example.com/v1?api_key=secret",
+            "https://example.com/v1#secret",
+        ] {
+            assert!(
+                valid_config(url)
+                    .validate(&SecretResolver::default())
+                    .is_err()
+            );
+        }
+
+        let mut config = valid_config("https://example.com/v1");
+        config
+            .providers
+            .get_mut("local")
+            .expect("provider")
+            .extra_headers
+            .insert("x-api-key".to_owned(), "secret".to_owned());
+        assert!(config.validate(&SecretResolver::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_server_timeouts() {
+        let mut server = ServerConfig {
+            admission_timeout_ms: 0,
+            ..ServerConfig::default()
+        };
+        assert!(validate_server(&server).is_err());
+        server.admission_timeout_ms = 1;
+        server.shutdown_grace_seconds = 0;
+        assert!(validate_server(&server).is_err());
+    }
+
+    #[test]
+    fn atomic_save_sets_protected_permissions() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("state").join("config.toml");
+        valid_config("http://localhost:11434/v1")
+            .save_atomic(&path)
+            .expect("save config");
+        assert!(Config::read(&path).is_ok());
+        assert!(!path.with_extension("toml.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("config metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(path.parent().expect("config parent"))
+                    .expect("directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
     }
 }
