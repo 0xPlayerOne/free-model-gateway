@@ -75,6 +75,20 @@ cargo test
 cargo run -- --help
 ```
 
+## Installation
+
+Build from source with the pinned toolchain:
+
+```bash
+cargo install --locked --path .
+```
+
+Tagged releases publish checksummed native archives for Linux x86_64,
+macOS Intel, and macOS Apple Silicon, plus a multi-architecture container
+image. Pull the container from GitHub Container Registry with the release tag,
+then follow the Docker quickstart above. Release publication is tag-gated;
+ordinary branches only run the packaging and container dry-runs.
+
 ## License
 
 This project is dual-licensed under the MIT License or Apache License 2.0, at
