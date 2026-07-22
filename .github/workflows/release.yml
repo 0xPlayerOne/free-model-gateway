@@ -37,6 +37,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
           - target: x86_64-apple-darwin
             os: macos-15-intel
           - target: aarch64-apple-darwin
@@ -49,17 +51,27 @@ jobs:
         with:
           toolchain: 1.87.0
           targets: ${{ matrix.target }}
+      - name: Install ARM64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install --yes gcc-aarch64-linux-gnu
       - name: Validate release tag
         if: github.event_name == 'push'
         shell: bash
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           test "${GITHUB_REF_NAME#v}" = "$version"
-      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Smoke native binary
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: |
           target/${{ matrix.target }}/release/model-gateway --version
           target/${{ matrix.target }}/release/model-gateway --help >/dev/null
+      - name: Inspect ARM64 binary
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: file target/${{ matrix.target }}/release/model-gateway | grep -E 'ARM aarch64|aarch64'
       - name: Create archive
         shell: bash
         run: |
@@ -92,7 +104,7 @@ jobs:
 
   container:
     name: Container release dry-run/publish
-    needs: validate
+    needs: [validate, package]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -108,8 +120,6 @@ jobs:
       - name: Smoke container dry-run
         if: github.event_name == 'pull_request'
         run: ./scripts/release-smoke.sh /tmp model-gateway:release-dry-run
-      - uses: docker/setup-qemu-action@v3
-        if: github.event_name == 'push'
       - uses: docker/setup-buildx-action@v3
         if: github.event_name == 'push'
       - uses: docker/login-action@v3
@@ -124,16 +134,54 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/model-gateway
           tags: type=ref,event=tag
-      - uses: docker/build-push-action@v6
+      - uses: actions/download-artifact@v4
         if: github.event_name == 'push'
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+      - name: Prepare native runtime contexts
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p image-context/amd64/runtime image-context/arm64/runtime
+          tar -xOf "dist/model-gateway-${version}-x86_64-unknown-linux-gnu.tar.gz" model-gateway > image-context/amd64/runtime/model-gateway
+          tar -xOf "dist/model-gateway-${version}-aarch64-unknown-linux-gnu.tar.gz" model-gateway > image-context/arm64/runtime/model-gateway
+          for arch in amd64 arm64; do
+            cp Dockerfile.release-runtime gateway.example.toml gateway.core.example.toml gateway.secondary.example.toml gateway.optional.example.toml "image-context/${arch}/"
+          done
+      - name: Publish AMD64 runtime image
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/model-gateway
+        with:
+          context: image-context/amd64
+          file: image-context/amd64/Dockerfile.release-runtime
+          platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}-amd64
           sbom: true
           provenance: mode=max
+      - name: Publish ARM64 runtime image
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/model-gateway
+        with:
+          context: image-context/arm64
+          file: image-context/arm64/Dockerfile.release-runtime
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}-arm64
+          sbom: true
+          provenance: mode=max
+      - name: Publish multi-architecture manifest
+        if: github.event_name == 'push'
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/model-gateway
+        run: docker buildx imagetools create --tag "$IMAGE:${GITHUB_REF_NAME}" "$IMAGE:${GITHUB_REF_NAME}-amd64" "$IMAGE:${GITHUB_REF_NAME}-arm64"
 
   publish:
     name: Publish release assets

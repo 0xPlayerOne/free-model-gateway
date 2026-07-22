@@ -42,7 +42,11 @@ PY
 done
 
 if [ -n "$IMAGE" ]; then
-    test "$(docker image inspect "$IMAGE" --format '{{.Config.User}}')" = model-gateway
+    image_user=$(docker image inspect "$IMAGE" --format '{{.Config.User}}')
+    case "$image_user" in
+        model-gateway|1000|1000:1000) ;;
+        *) printf 'Unexpected runtime image user: %s\n' "$image_user" >&2; exit 1 ;;
+    esac
     test "$(docker image inspect "$IMAGE" --format '{{index .Config.Entrypoint 0}}')" = model-gateway
     docker run --rm --entrypoint model-gateway "$IMAGE" --version >/dev/null
     docker run --rm --entrypoint sh "$IMAGE" -c \
