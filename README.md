@@ -84,6 +84,17 @@ default to free-only. Configure `cost_microusd` quota windows to impose
 transactional spend caps. If no benchmarked authorized candidate remains, the
 route falls back once through `auto-free` and then `local`.
 
+The `auto-frontier` model applies the same selector with an additional canonical
+creator constraint: only benchmark entries identified exactly as OpenAI or
+Anthropic are eligible, regardless of which configured provider carries the
+offering. It uses independent frontier quality floors, requires explicit paid
+or subscription authorization, and excludes preview/beta/experimental model
+IDs unless that provider sets `allow_preview_models = true`. If no eligible
+candidate is safe and available, the gateway returns a fixed OpenAI-shaped
+frontier error; it never falls back to `auto-efficient`, `auto-free`, or
+`local`. Set `server.auto_frontier_enabled = false` to hide and disable the
+route during a controlled rollout.
+
 Refresh dynamic provider catalogs explicitly with `model-gateway catalog
 refresh`, and inspect cache age with `model-gateway catalog status`. Override
 the state location with `MODEL_GATEWAY_STATE_PATH`.

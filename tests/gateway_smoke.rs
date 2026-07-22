@@ -242,6 +242,10 @@ async fn forwards_json_and_tools_without_rewriting_response_model() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["x-model-gateway-alias"], "smoke");
     assert_eq!(response.headers()["x-model-gateway-provider"], "local");
+    assert_eq!(
+        response.headers()["x-model-gateway-served-model"],
+        "upstream-model"
+    );
     let body: Value = response.json().await.expect("json response");
     assert_eq!(body["model"], "upstream-model");
     assert_eq!(
@@ -418,7 +422,8 @@ async fn model_and_health_endpoints_are_detail_free() {
     assert_eq!(models["data"][0]["id"], "local");
     assert_eq!(models["data"][1]["id"], "auto-free");
     assert_eq!(models["data"][2]["id"], "auto-efficient");
-    assert_eq!(models["data"][3]["id"], "smoke");
+    assert_eq!(models["data"][3]["id"], "auto-frontier");
+    assert_eq!(models["data"][4]["id"], "smoke");
     let ready: Value = client
         .get(format!("{gateway}/health/ready"))
         .send()
@@ -428,6 +433,48 @@ async fn model_and_health_endpoints_are_detail_free() {
         .await
         .expect("ready json");
     assert_eq!(ready, json!({"status": "ready"}));
+}
+
+#[tokio::test]
+async fn disabled_frontier_route_is_hidden_and_rejected() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let mut config = config_for(
+        BTreeMap::from([(
+            "provider".to_owned(),
+            provider(format!("http://{upstream}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "provider".to_owned(),
+            model: "model".to_owned(),
+        }],
+    );
+    config.server.auto_frontier_enabled = false;
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+    let models: Value = client
+        .get(format!("{gateway}/v1/models"))
+        .send()
+        .await
+        .expect("models response")
+        .json()
+        .await
+        .expect("models JSON");
+    assert!(
+        !models["data"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .any(|model| model["id"] == "auto-frontier")
+    );
+    let response = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-frontier", "messages": []}))
+        .send()
+        .await
+        .expect("disabled route response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = response.json().await.expect("error JSON");
+    assert_eq!(body["error"]["code"], "route_disabled");
 }
 
 #[tokio::test]
@@ -985,6 +1032,10 @@ async fn auto_efficient_uses_canonical_mapping_and_reasoning_effort() {
         response.headers()["x-model-gateway-reasoning-effort"],
         "High"
     );
+    assert_eq!(
+        response.headers()["x-model-gateway-canonical-model"],
+        "canonical-model"
+    );
     let body: Value = response.json().await.expect("response JSON");
     assert!(
         body["choices"][0]["message"]["content"]
@@ -1022,6 +1073,356 @@ async fn auto_efficient_falls_back_when_paid_models_are_unbenchmarked() {
         .expect("fallback response");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["x-model-gateway-provider"], "free");
+}
+
+#[tokio::test]
+async fn auto_frontier_selects_only_openai_or_anthropic_canonical_creators() {
+    let anthropic = spawn_provider(ProviderResponse::Stream).await;
+    let other = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (provider, model) in [("anthropic", "claude"), ("other", "other-model")] {
+        store
+            .replace_catalog(
+                provider,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free: false,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    supports_structured_output: Some(true),
+                }],
+            )
+            .expect("catalog");
+    }
+    let mut claude = BenchmarkModel::fixture("claude", 90.0, 90.0, 90.0, 90.0, 2.0, 4.0);
+    claude.creator = Some("Anthropic".to_owned());
+    let mut cheaper = BenchmarkModel::fixture("other-model", 99.0, 99.0, 99.0, 99.0, 0.1, 0.1);
+    cheaper.creator = Some("Other Labs".to_owned());
+    store
+        .replace_benchmarks("fixture", "Fixture", &[claude, cheaper])
+        .expect("benchmarks");
+    drop(store);
+    let mut anthropic_provider = provider(format!("http://{anthropic}/v1"));
+    anthropic_provider.billing_mode = BillingMode::Paid;
+    let mut other_provider = provider(format!("http://{other}/v1"));
+    other_provider.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([
+            ("anthropic".to_owned(), anthropic_provider),
+            ("other".to_owned(), other_provider),
+        ]),
+        vec![TargetConfig {
+            provider: "anthropic".to_owned(),
+            model: "claude".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-frontier",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .expect("frontier response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "anthropic");
+    let body = response.text().await.expect("frontier stream");
+    assert!(body.contains("- Claude:"));
+    assert!(body.contains("data: [DONE]"));
+}
+
+#[tokio::test]
+async fn auto_frontier_returns_explicit_error_without_free_or_local_fallback() {
+    let paid = spawn_provider(ProviderResponse::Success).await;
+    let free = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for (provider, model, is_free) in [
+        ("paid", "non-frontier", false),
+        ("free", "free-model", true),
+    ] {
+        store
+            .replace_catalog(
+                provider,
+                &[CatalogRecord {
+                    model: model.to_owned(),
+                    is_free,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    supports_structured_output: Some(true),
+                }],
+            )
+            .expect("catalog");
+    }
+    let mut benchmark = BenchmarkModel::fixture("non-frontier", 99.0, 99.0, 99.0, 99.0, 0.1, 0.1);
+    benchmark.creator = Some("Other Labs".to_owned());
+    store
+        .replace_benchmarks("fixture", "Fixture", &[benchmark])
+        .expect("benchmarks");
+    drop(store);
+    let mut paid_provider = provider(format!("http://{paid}/v1"));
+    paid_provider.billing_mode = BillingMode::Paid;
+    let mut free_provider = provider(format!("http://{free}/v1"));
+    free_provider.free_models = vec!["free-model".to_owned()];
+    let mut config = config_for(
+        BTreeMap::from([
+            ("paid".to_owned(), paid_provider),
+            ("free".to_owned(), free_provider),
+        ]),
+        vec![TargetConfig {
+            provider: "paid".to_owned(),
+            model: "non-frontier".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-frontier", "messages": []}))
+        .send()
+        .await
+        .expect("frontier error");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("error JSON");
+    assert_eq!(body["error"]["code"], "frontier_access_unconfigured");
+}
+
+#[tokio::test]
+async fn auto_frontier_reroutes_same_canonical_model_before_output() {
+    let exhausted = spawn_provider(ProviderResponse::Failure(
+        StatusCode::TOO_MANY_REQUESTS,
+        "exhausted",
+    ))
+    .await;
+    let available = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    for provider in ["a", "b"] {
+        store
+            .replace_catalog(
+                provider,
+                &[CatalogRecord {
+                    model: "carrier-model".to_owned(),
+                    is_free: false,
+                    context_length: Some(128_000),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    supports_structured_output: Some(true),
+                }],
+            )
+            .expect("catalog");
+    }
+    let mut benchmark = BenchmarkModel::fixture("gpt-canonical", 90.0, 90.0, 90.0, 90.0, 1.0, 1.0);
+    benchmark.creator = Some("OpenAI".to_owned());
+    store
+        .replace_benchmarks("fixture", "Fixture", &[benchmark])
+        .expect("benchmarks");
+    drop(store);
+    let configured_provider = |base_url: String| {
+        let mut configured = provider(base_url);
+        configured.billing_mode = BillingMode::Paid;
+        configured
+            .model_mappings
+            .insert("carrier-model".to_owned(), "gpt-canonical".to_owned());
+        configured
+    };
+    let mut config = config_for(
+        BTreeMap::from([
+            (
+                "a".to_owned(),
+                configured_provider(format!("http://{exhausted}/v1")),
+            ),
+            (
+                "b".to_owned(),
+                configured_provider(format!("http://{available}/v1")),
+            ),
+        ]),
+        vec![TargetConfig {
+            provider: "a".to_owned(),
+            model: "carrier-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-frontier", "messages": []}))
+        .send()
+        .await
+        .expect("rerouted response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-model-gateway-provider"], "b");
+    assert_eq!(response.headers()["x-model-gateway-fallbacks"], "1");
+}
+
+#[tokio::test]
+async fn auto_frontier_requires_explicit_billing_and_preview_authorization() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "frontier",
+            &[CatalogRecord {
+                model: "gpt-preview".to_owned(),
+                is_free: false,
+                context_length: Some(128_000),
+                supports_tools: Some(true),
+                supports_vision: Some(true),
+                supports_structured_output: Some(true),
+            }],
+        )
+        .expect("catalog");
+    let mut benchmark = BenchmarkModel::fixture("gpt-preview", 95.0, 95.0, 95.0, 95.0, 1.0, 1.0);
+    benchmark.creator = Some("OpenAI".to_owned());
+    store
+        .replace_benchmarks("fixture", "Fixture", &[benchmark])
+        .expect("benchmarks");
+    drop(store);
+    let mut config = config_for(
+        BTreeMap::from([(
+            "frontier".to_owned(),
+            provider(format!("http://{upstream}/v1")),
+        )]),
+        vec![TargetConfig {
+            provider: "frontier".to_owned(),
+            model: "gpt-preview".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    let unauthorized = spawn_gateway(config.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("{unauthorized}/v1/chat/completions"))
+        .json(&json!({"model": "auto-frontier", "messages": []}))
+        .send()
+        .await
+        .expect("billing error");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("billing error JSON");
+    assert_eq!(body["error"]["code"], "frontier_billing_not_authorized");
+
+    let frontier = config.providers.get_mut("frontier").expect("provider");
+    frontier.billing_mode = BillingMode::Paid;
+    let preview_blocked = spawn_gateway(config.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("{preview_blocked}/v1/chat/completions"))
+        .json(&json!({"model": "auto-frontier", "messages": []}))
+        .send()
+        .await
+        .expect("preview error");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("preview error JSON");
+    assert_eq!(body["error"]["code"], "frontier_preview_not_authorized");
+
+    config
+        .providers
+        .get_mut("frontier")
+        .expect("provider")
+        .allow_preview_models = true;
+    let preview_allowed = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("{preview_allowed}/v1/chat/completions"))
+        .json(&json!({"model": "auto-frontier", "messages": []}))
+        .send()
+        .await
+        .expect("preview response");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
+    let upstream = spawn_provider(ProviderResponse::Success).await;
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    let catalog = |supports_tools| CatalogRecord {
+        model: "gpt-frontier".to_owned(),
+        is_free: false,
+        context_length: Some(128_000),
+        supports_tools: Some(supports_tools),
+        supports_vision: Some(true),
+        supports_structured_output: Some(true),
+    };
+    store
+        .replace_catalog("frontier", &[catalog(false)])
+        .expect("catalog");
+    let mut benchmark = BenchmarkModel::fixture("gpt-frontier", 60.0, 60.0, 60.0, 60.0, 1.0, 1.0);
+    benchmark.creator = Some("OpenAI".to_owned());
+    store
+        .replace_benchmarks("fixture", "Fixture", &[benchmark])
+        .expect("benchmarks");
+    drop(store);
+    let mut frontier_provider = provider(format!("http://{upstream}/v1"));
+    frontier_provider.billing_mode = BillingMode::Paid;
+    let mut config = config_for(
+        BTreeMap::from([("frontier".to_owned(), frontier_provider)]),
+        vec![TargetConfig {
+            provider: "frontier".to_owned(),
+            model: "gpt-frontier".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path.clone());
+    config.server.frontier_quality_floor_simple = 70.0;
+    let quality_gateway = spawn_gateway(config.clone()).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{quality_gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-frontier", "messages": []}))
+        .send()
+        .await
+        .expect("quality error");
+    let body: Value = response.json().await.expect("quality error JSON");
+    assert_eq!(body["error"]["code"], "frontier_quality_floor_not_met");
+
+    config.server.frontier_quality_floor_simple = 50.0;
+    let capability_gateway = spawn_gateway(config.clone()).await;
+    let response = client
+        .post(format!("{capability_gateway}/v1/chat/completions"))
+        .json(&json!({
+            "model": "auto-frontier",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "edit"}}]
+        }))
+        .send()
+        .await
+        .expect("capability error");
+    let body: Value = response.json().await.expect("capability error JSON");
+    assert_eq!(body["error"]["code"], "frontier_capability_mismatch");
+
+    RoutingStore::open(Some(&state_path))
+        .expect("routing store")
+        .replace_catalog("frontier", &[catalog(true)])
+        .expect("updated catalog");
+    config
+        .providers
+        .get_mut("frontier")
+        .expect("provider")
+        .quotas = vec![QuotaLimit {
+        kind: QuotaKind::CostMicrousd,
+        limit: 1,
+        window_seconds: 86_400,
+    }];
+    let spend_gateway = spawn_gateway(config).await;
+    let response = client
+        .post(format!("{spend_gateway}/v1/chat/completions"))
+        .json(&json!({"model": "auto-frontier", "messages": []}))
+        .send()
+        .await
+        .expect("spend error");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("spend error JSON");
+    assert_eq!(body["error"]["code"], "frontier_spend_cap_reached");
 }
 
 #[tokio::test]

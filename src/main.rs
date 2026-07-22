@@ -528,10 +528,12 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
     }
     apply_pending_secrets(&resolver, &config_path, &config, pending_secrets)?;
     println!("Saved {}", config_path.display());
-    println!(
-        "Models: local, auto-free, auto-efficient, {}",
-        config.models.keys().cloned().collect::<Vec<_>>().join(", ")
-    );
+    let mut routes = vec!["local", "auto-free", "auto-efficient"];
+    if config.server.auto_frontier_enabled {
+        routes.push("auto-frontier");
+    }
+    routes.extend(config.models.keys().map(String::as_str));
+    println!("Models: {}", routes.join(", "));
     let endpoint = "http://127.0.0.1:8008/v1";
     println!("Hermes custom-endpoint YAML:");
     println!("model:");

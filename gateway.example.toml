@@ -11,6 +11,10 @@ benchmark_max_age_seconds = 604800
 quality_floor_simple = 40.0
 quality_floor_medium = 60.0
 quality_floor_complex = 75.0
+frontier_quality_floor_simple = 50.0
+frontier_quality_floor_medium = 70.0
+frontier_quality_floor_complex = 85.0
+auto_frontier_enabled = true
 
 [providers.openrouter]
 profile = "open_router"
@@ -23,6 +27,7 @@ connect_timeout_seconds = 10
 response_header_timeout_seconds = 300
 stream_idle_timeout_seconds = 180
 billing_mode = "paid"
+allow_preview_models = false
 
 [providers.openrouter.model_mappings]
 "anthropic/claude-sonnet-4.6" = "claude-sonnet-4-6"

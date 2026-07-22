@@ -18,11 +18,15 @@ use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 
-use crate::benchmarks::{Complexity, ScoredCandidate, classify, pareto_rank, quality_for};
-use crate::config::{BillingMode, Config, ProviderConfig, TargetConfig};
+use crate::benchmarks::{
+    Complexity, ScoredCandidate, classify, is_frontier_model, is_preview_model, pareto_rank,
+    quality_for,
+};
+use crate::config::{BillingMode, Config, ProviderConfig, QuotaKind, TargetConfig};
 use crate::providers::prepare_request;
 use crate::routing::{
-    ReservationRelease, RoutingError, RoutingStore, is_verified_free, quota_reference,
+    ReservationOutcome, ReservationRelease, RoutingError, RoutingStore, is_verified_free,
+    quota_reference,
 };
 use crate::secrets::{SecretError, SecretResolver};
 
@@ -245,12 +249,20 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         "auto-free".to_owned(),
         "auto-efficient".to_owned(),
     ];
+    if state.config.server.auto_frontier_enabled {
+        ids.push("auto-frontier".to_owned());
+    }
     ids.extend(
         state
             .config
             .models
             .keys()
-            .filter(|id| !matches!(id.as_str(), "local" | "auto-free" | "auto-efficient"))
+            .filter(|id| {
+                !matches!(
+                    id.as_str(),
+                    "local" | "auto-free" | "auto-efficient" | "auto-frontier"
+                )
+            })
             .cloned(),
     );
     let data = ids
@@ -435,6 +447,7 @@ async fn chat_completions(
     };
     let mut attempts = 0usize;
     let mut last_error = None;
+    let mut frontier_exhaustion_code = None;
     let mut targets = targets;
     let mut target_index = 0;
     while target_index < targets.len() {
@@ -456,8 +469,21 @@ async fn chat_completions(
             })
             .await
             {
-                Ok(true) => {}
-                Ok(false) => continue,
+                Ok(ReservationOutcome::Reserved) => {}
+                Ok(ReservationOutcome::Cooldown) => {
+                    frontier_exhaustion_code.get_or_insert("frontier_all_candidates_unhealthy");
+                    continue;
+                }
+                Ok(ReservationOutcome::QuotaExceeded(QuotaKind::CostMicrousd)) => {
+                    frontier_exhaustion_code = Some("frontier_spend_cap_reached");
+                    continue;
+                }
+                Ok(ReservationOutcome::QuotaExceeded(_)) => {
+                    if frontier_exhaustion_code != Some("frontier_spend_cap_reached") {
+                        frontier_exhaustion_code = Some("frontier_quota_exhausted");
+                    }
+                    continue;
+                }
                 Err(error) => {
                     tracing::warn!(
                         event = "routing_state_error",
@@ -808,6 +834,13 @@ async fn chat_completions(
             &provider,
             attempts,
         ),
+        None if model == "auto-frontier" => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            request_id,
+            "all eligible frontier candidates are exhausted or unhealthy",
+            "upstream_error",
+            Some(frontier_exhaustion_code.unwrap_or("frontier_all_candidates_unhealthy")),
+        ),
         None => error_response(
             StatusCode::BAD_GATEWAY,
             request_id,
@@ -847,6 +880,7 @@ struct SelectedTarget {
 
 #[derive(Clone)]
 struct SelectionMetadata {
+    canonical_model: String,
     task: &'static str,
     complexity: &'static str,
     classifier_version: &'static str,
@@ -880,6 +914,16 @@ async fn resolve_targets(
     }
     if model == "auto-efficient" {
         return resolve_auto_efficient_targets(state, request, session_hash).await;
+    }
+    if model == "auto-frontier" {
+        if !state.config.server.auto_frontier_enabled {
+            return Err((
+                StatusCode::NOT_FOUND,
+                "model 'auto-frontier' is disabled".to_owned(),
+                "route_disabled",
+            ));
+        }
+        return resolve_auto_frontier_targets(state, request, session_hash).await;
     }
     if let Some(config) = state.config.models.get(model) {
         return Ok(config
@@ -1060,6 +1104,57 @@ async fn resolve_auto_efficient_targets(
     request: &Value,
     session_hash: Option<&str>,
 ) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
+    let mut targets =
+        resolve_benchmark_targets(state, request, session_hash, BenchmarkPolicy::Efficient).await?;
+    let selected = targets
+        .iter()
+        .map(|target| (target.provider.clone(), target.model.clone()))
+        .collect::<BTreeSet<_>>();
+    match resolve_auto_free_targets(state, request, session_hash).await {
+        Ok(fallbacks) => {
+            for target in fallbacks {
+                if !selected.contains(&(target.provider.clone(), target.model.clone())) {
+                    targets.push(target);
+                }
+            }
+        }
+        Err(error) if targets.is_empty() => return Err(error),
+        Err(_) => {}
+    }
+    Ok(targets)
+}
+
+async fn resolve_auto_frontier_targets(
+    state: &AppState,
+    request: &Value,
+    session_hash: Option<&str>,
+) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
+    let targets =
+        resolve_benchmark_targets(state, request, session_hash, BenchmarkPolicy::Frontier).await?;
+    Ok(targets)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BenchmarkPolicy {
+    Efficient,
+    Frontier,
+}
+
+impl BenchmarkPolicy {
+    const fn route(self) -> &'static str {
+        match self {
+            Self::Efficient => "auto-efficient",
+            Self::Frontier => "auto-frontier",
+        }
+    }
+}
+
+async fn resolve_benchmark_targets(
+    state: &AppState,
+    request: &Value,
+    session_hash: Option<&str>,
+    policy: BenchmarkPolicy,
+) -> Result<Vec<SelectedTarget>, (StatusCode, String, &'static str)> {
     let catalog_age = state.config.server.catalog_max_age_seconds;
     let benchmark_age = state.config.server.benchmark_max_age_seconds;
     let (offerings, benchmarks) = tokio::try_join!(
@@ -1078,10 +1173,25 @@ async fn resolve_auto_efficient_targets(
         )
     })?;
     let classification = classify(request);
-    let quality_floor = match classification.complexity {
-        Complexity::Simple => state.config.server.quality_floor_simple,
-        Complexity::Medium => state.config.server.quality_floor_medium,
-        Complexity::Complex => state.config.server.quality_floor_complex,
+    let quality_floor = match (policy, classification.complexity) {
+        (BenchmarkPolicy::Efficient, Complexity::Simple) => {
+            state.config.server.quality_floor_simple
+        }
+        (BenchmarkPolicy::Efficient, Complexity::Medium) => {
+            state.config.server.quality_floor_medium
+        }
+        (BenchmarkPolicy::Efficient, Complexity::Complex) => {
+            state.config.server.quality_floor_complex
+        }
+        (BenchmarkPolicy::Frontier, Complexity::Simple) => {
+            state.config.server.frontier_quality_floor_simple
+        }
+        (BenchmarkPolicy::Frontier, Complexity::Medium) => {
+            state.config.server.frontier_quality_floor_medium
+        }
+        (BenchmarkPolicy::Frontier, Complexity::Complex) => {
+            state.config.server.frontier_quality_floor_complex
+        }
     };
     let requirements = RequestRequirements::from_request(request);
     let requested_effort = request
@@ -1096,6 +1206,14 @@ async fn resolve_auto_efficient_targets(
             .push(benchmark);
     }
     let mut candidates = Vec::new();
+    let mut frontier_saw_mapping = false;
+    let mut frontier_saw_identity = false;
+    let mut frontier_saw_billing = false;
+    let mut frontier_saw_available = false;
+    let mut frontier_preview_blocked = false;
+    let mut frontier_reached_capability = false;
+    let mut frontier_saw_capability = false;
+    let mut frontier_saw_quality = false;
     for offering in offerings {
         let Some(provider) = state.config.providers.get(&offering.provider) else {
             continue;
@@ -1103,23 +1221,15 @@ async fn resolve_auto_efficient_targets(
         let Some(runtime) = state.providers.get(&offering.provider) else {
             continue;
         };
-        if !runtime.available
-            || (!offering.is_free && provider.billing_mode == BillingMode::Free)
-            || (!provider.model_allowlist.is_empty()
-                && !provider
-                    .model_allowlist
-                    .iter()
-                    .any(|model| model == &offering.model))
+        if (!provider.model_allowlist.is_empty()
+            && !provider
+                .model_allowlist
+                .iter()
+                .any(|model| model == &offering.model))
             || provider
                 .model_denylist
                 .iter()
                 .any(|model| model == &offering.model)
-            || offering
-                .context_length
-                .is_some_and(|context| context < requirements.estimated_tokens)
-            || (requirements.tools && offering.supports_tools != Some(true))
-            || (requirements.vision && offering.supports_vision != Some(true))
-            || (requirements.structured && offering.supports_structured_output != Some(true))
         {
             continue;
         }
@@ -1131,10 +1241,58 @@ async fn resolve_auto_efficient_targets(
         let Some(model_benchmarks) = benchmark_by_model.get(canonical) else {
             continue;
         };
+        if policy == BenchmarkPolicy::Frontier {
+            frontier_saw_mapping = true;
+            if !model_benchmarks
+                .iter()
+                .any(|benchmark| is_frontier_model(benchmark.creator.as_deref(), canonical))
+            {
+                continue;
+            }
+            frontier_saw_identity = true;
+            if provider.billing_mode == BillingMode::Free {
+                continue;
+            }
+            frontier_saw_billing = true;
+            if !runtime.available {
+                continue;
+            }
+            frontier_saw_available = true;
+            if (is_preview_model(canonical) || is_preview_model(&offering.model))
+                && !provider.allow_preview_models
+            {
+                frontier_preview_blocked = true;
+                continue;
+            }
+        } else if !runtime.available
+            || (!offering.is_free && provider.billing_mode == BillingMode::Free)
+        {
+            continue;
+        }
+        let capability_mismatch = offering
+            .context_length
+            .is_some_and(|context| context < requirements.estimated_tokens)
+            || (requirements.tools && offering.supports_tools != Some(true))
+            || (requirements.vision && offering.supports_vision != Some(true))
+            || (requirements.structured && offering.supports_structured_output != Some(true));
+        if policy == BenchmarkPolicy::Frontier {
+            frontier_reached_capability = true;
+        }
+        if capability_mismatch {
+            continue;
+        }
+        if policy == BenchmarkPolicy::Frontier {
+            frontier_saw_capability = true;
+        }
         let has_effort_variants = model_benchmarks
             .iter()
             .any(|benchmark| benchmark.reasoning_effort.is_some());
         for benchmark in model_benchmarks {
+            if policy == BenchmarkPolicy::Frontier
+                && !is_frontier_model(benchmark.creator.as_deref(), canonical)
+            {
+                continue;
+            }
             if requested_effort.is_some()
                 && has_effort_variants
                 && benchmark.reasoning_effort.as_deref() != requested_effort
@@ -1146,6 +1304,9 @@ async fn resolve_auto_efficient_targets(
             };
             if quality < quality_floor {
                 continue;
+            }
+            if policy == BenchmarkPolicy::Frontier {
+                frontier_saw_quality = true;
             }
             let expected_cost_microusd =
                 if offering.is_free || provider.billing_mode == BillingMode::Subscription {
@@ -1184,6 +1345,7 @@ async fn resolve_auto_efficient_targets(
                     expected_cost_microusd,
                     reasoning_effort: benchmark.reasoning_effort.clone(),
                     selection: Some(SelectionMetadata {
+                        canonical_model: canonical.to_owned(),
                         task: classification.task.as_str(),
                         complexity: classification.complexity.as_str(),
                         classifier_version: classification.version,
@@ -1201,8 +1363,9 @@ async fn resolve_auto_efficient_targets(
     let pinned = match session_hash {
         Some(session_hash) => {
             let session_hash = session_hash.to_owned();
+            let route = policy.route();
             routing_operation(state.routing.clone(), move |routing| {
-                routing.session_pin(&session_hash, "auto-efficient")
+                routing.session_pin(&session_hash, route)
             })
             .await
             .ok()
@@ -1227,20 +1390,49 @@ async fn resolve_auto_efficient_targets(
                 .then_with(|| (&left.provider, &left.model).cmp(&(&right.provider, &right.model)))
         })
     });
-    let selected = targets
-        .iter()
-        .map(|target| (target.provider.clone(), target.model.clone()))
-        .collect::<BTreeSet<_>>();
-    match resolve_auto_free_targets(state, request, session_hash).await {
-        Ok(fallbacks) => {
-            for target in fallbacks {
-                if !selected.contains(&(target.provider.clone(), target.model.clone())) {
-                    targets.push(target);
-                }
-            }
-        }
-        Err(error) if targets.is_empty() => return Err(error),
-        Err(_) => {}
+    if policy == BenchmarkPolicy::Frontier && targets.is_empty() {
+        let (message, code) = if !frontier_saw_mapping {
+            (
+                "no configured offering has a fresh canonical benchmark mapping",
+                "frontier_no_benchmark_mapping",
+            )
+        } else if !frontier_saw_identity {
+            (
+                "no mapping identifies an OpenAI GPT/reasoning or Anthropic Claude model",
+                "frontier_access_unconfigured",
+            )
+        } else if !frontier_saw_billing {
+            (
+                "frontier provider billing is not explicitly authorized",
+                "frontier_billing_not_authorized",
+            )
+        } else if !frontier_saw_available {
+            (
+                "configured frontier provider credentials are unavailable",
+                "frontier_access_unavailable",
+            )
+        } else if frontier_preview_blocked && !frontier_reached_capability {
+            (
+                "frontier preview models require explicit provider authorization",
+                "frontier_preview_not_authorized",
+            )
+        } else if frontier_reached_capability && !frontier_saw_capability {
+            (
+                "no frontier candidate satisfies the request capabilities",
+                "frontier_capability_mismatch",
+            )
+        } else if !frontier_saw_quality {
+            (
+                "no frontier candidate clears the configured quality floor",
+                "frontier_quality_floor_not_met",
+            )
+        } else {
+            (
+                "no frontier candidate is safely available",
+                "frontier_no_candidate",
+            )
+        };
+        return Err((StatusCode::SERVICE_UNAVAILABLE, message.to_owned(), code));
     }
     Ok(targets)
 }
@@ -1533,6 +1725,7 @@ struct StreamContext {
 #[derive(Clone)]
 struct ModelMetadata {
     upstream_model: String,
+    canonical_model: String,
     family: String,
     display: String,
     reasoning_effort: String,
@@ -1542,7 +1735,12 @@ struct ModelMetadata {
 
 impl ModelMetadata {
     fn from_target(target: &SelectedTarget, request: &Value) -> Self {
-        let (family, display) = model_name_parts(&target.model);
+        let canonical_model = target
+            .selection
+            .as_ref()
+            .map(|selection| selection.canonical_model.clone())
+            .unwrap_or_else(|| target.model.clone());
+        let (family, display) = model_name_parts(&canonical_model);
         let effort = request
             .get("reasoning_effort")
             .and_then(Value::as_str)
@@ -1557,6 +1755,7 @@ impl ModelMetadata {
             .unwrap_or_else(|| "Default".to_owned());
         Self {
             upstream_model: target.model.clone(),
+            canonical_model,
             family,
             display,
             reasoning_effort: effort,
@@ -1655,6 +1854,8 @@ async fn relay_response(
                 );
             }
         };
+        let served_model = response_model(&body)
+            .or_else(|| provider_routed_model(&upstream_headers).map(ToOwned::to_owned));
         let body = match decorate_json_response(&body, &model_metadata.footer()) {
             Ok(body) => body,
             Err(message) => {
@@ -1701,6 +1902,11 @@ async fn relay_response(
             attempts.saturating_sub(1),
         );
         add_model_headers(downstream.headers_mut(), &model_metadata);
+        if let Some(served_model) = served_model {
+            downstream
+                .headers_mut()
+                .insert("x-model-gateway-served-model", header_value(&served_model));
+        }
         return downstream;
     }
     let request_log = RequestLog {
@@ -1761,6 +1967,11 @@ async fn relay_response(
         attempts.saturating_sub(1),
     );
     add_model_headers(response.headers_mut(), &model_metadata);
+    if let Some(served_model) = provider_routed_model(&upstream_headers) {
+        response
+            .headers_mut()
+            .insert("x-model-gateway-served-model", header_value(served_model));
+    }
     if is_stream {
         response
             .headers_mut()
@@ -1794,6 +2005,20 @@ fn decorate_json_response(body: &[u8], footer: &str) -> Result<Bytes, &'static s
     serde_json::to_vec(&value)
         .map(Bytes::from)
         .map_err(|_| "upstream response could not be decorated")
+}
+
+fn response_model(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn provider_routed_model(headers: &HeaderMap) -> Option<&str> {
+    ["x-openrouter-model", "x-provider-model", "x-model-id"]
+        .into_iter()
+        .find_map(|name| headers.get(name)?.to_str().ok())
 }
 
 #[derive(Default)]
@@ -2022,6 +2247,10 @@ fn add_model_headers(headers: &mut HeaderMap, metadata: &ModelMetadata) {
     headers.insert(
         "x-model-gateway-model",
         header_value(&metadata.upstream_model),
+    );
+    headers.insert(
+        "x-model-gateway-canonical-model",
+        header_value(&metadata.canonical_model),
     );
     headers.insert(
         "x-model-gateway-reasoning-effort",

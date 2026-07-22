@@ -73,6 +73,14 @@ pub struct ServerConfig {
     pub quality_floor_medium: f64,
     #[serde(default = "default_quality_floor_complex")]
     pub quality_floor_complex: f64,
+    #[serde(default = "default_frontier_quality_floor_simple")]
+    pub frontier_quality_floor_simple: f64,
+    #[serde(default = "default_frontier_quality_floor_medium")]
+    pub frontier_quality_floor_medium: f64,
+    #[serde(default = "default_frontier_quality_floor_complex")]
+    pub frontier_quality_floor_complex: f64,
+    #[serde(default = "default_true")]
+    pub auto_frontier_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,6 +128,8 @@ pub struct ProviderConfig {
     pub quotas: Vec<QuotaLimit>,
     #[serde(default)]
     pub model_mappings: BTreeMap<String, String>,
+    #[serde(default)]
+    pub allow_preview_models: bool,
 }
 
 impl Default for ProviderConfig {
@@ -143,6 +153,7 @@ impl Default for ProviderConfig {
             model_denylist: Vec::new(),
             quotas: Vec::new(),
             model_mappings: BTreeMap::new(),
+            allow_preview_models: false,
         }
     }
 }
@@ -236,6 +247,10 @@ impl Default for ServerConfig {
             quality_floor_simple: default_quality_floor_simple(),
             quality_floor_medium: default_quality_floor_medium(),
             quality_floor_complex: default_quality_floor_complex(),
+            frontier_quality_floor_simple: default_frontier_quality_floor_simple(),
+            frontier_quality_floor_medium: default_frontier_quality_floor_medium(),
+            frontier_quality_floor_complex: default_frontier_quality_floor_complex(),
+            auto_frontier_enabled: true,
         }
     }
 }
@@ -327,6 +342,12 @@ impl Config {
             || !valid_quality_floor(self.server.quality_floor_complex)
             || self.server.quality_floor_simple > self.server.quality_floor_medium
             || self.server.quality_floor_medium > self.server.quality_floor_complex
+            || !valid_quality_floor(self.server.frontier_quality_floor_simple)
+            || !valid_quality_floor(self.server.frontier_quality_floor_medium)
+            || !valid_quality_floor(self.server.frontier_quality_floor_complex)
+            || self.server.frontier_quality_floor_simple > self.server.frontier_quality_floor_medium
+            || self.server.frontier_quality_floor_medium
+                > self.server.frontier_quality_floor_complex
         {
             return Err(ConfigError::Invalid(
                 "benchmark age and ordered quality floors must be valid (0-100)".to_owned(),
@@ -363,7 +384,10 @@ impl Config {
         }
         for (alias, model) in &self.models {
             validate_identifier(alias, "model alias")?;
-            if matches!(alias.as_str(), "local" | "auto-free" | "auto-efficient") {
+            if matches!(
+                alias.as_str(),
+                "local" | "auto-free" | "auto-efficient" | "auto-frontier"
+            ) {
                 return Err(ConfigError::Invalid(format!(
                     "model alias '{alias}' is reserved for a built-in route"
                 )));
@@ -739,6 +763,22 @@ const fn default_quality_floor_complex() -> f64 {
     75.0
 }
 
+const fn default_frontier_quality_floor_simple() -> f64 {
+    50.0
+}
+
+const fn default_frontier_quality_floor_medium() -> f64 {
+    70.0
+}
+
+const fn default_frontier_quality_floor_complex() -> f64 {
+    85.0
+}
+
+const fn default_true() -> bool {
+    true
+}
+
 const fn default_connect_timeout_seconds() -> u64 {
     10
 }
@@ -780,6 +820,7 @@ mod tests {
             model_denylist: Vec::new(),
             quotas: Vec::new(),
             model_mappings: BTreeMap::new(),
+            allow_preview_models: false,
         }
     }
 
@@ -816,6 +857,7 @@ mod tests {
         assert_eq!(server.local_base_url, "http://127.0.0.1:8000/v1");
         assert_eq!(server.local_model, None);
         assert!(server.local_model_cache_seconds > 0);
+        assert!(server.auto_frontier_enabled);
     }
 
     #[test]
@@ -1009,6 +1051,11 @@ mod tests {
                 .iter()
                 .any(|quota| quota.kind == QuotaKind::CostMicrousd)
         );
+        assert!(
+            config.server.frontier_quality_floor_simple
+                < config.server.frontier_quality_floor_complex
+        );
+        assert!(!openrouter.allow_preview_models);
     }
 
     #[test]

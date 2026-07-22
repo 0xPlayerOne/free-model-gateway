@@ -201,6 +201,13 @@ pub enum ReservationRelease {
     KnownFailure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservationOutcome {
+    Reserved,
+    Cooldown,
+    QuotaExceeded(QuotaKind),
+}
+
 impl RoutingStore {
     pub fn open(path: Option<&Path>) -> Result<Self, RoutingError> {
         let connection = match path {
@@ -555,7 +562,7 @@ impl RoutingStore {
         estimated_tokens: u64,
         expected_cost_microusd: u64,
         quotas: &[QuotaLimit],
-    ) -> Result<bool, RoutingError> {
+    ) -> Result<ReservationOutcome, RoutingError> {
         let now = epoch_seconds();
         let mut connection = self.connection.lock().map_err(|_| RoutingError::Lock)?;
         let transaction = connection.transaction()?;
@@ -567,7 +574,7 @@ impl RoutingStore {
             )
             .optional()?;
         if cooldown.is_some_and(|until| until > now) {
-            return Ok(false);
+            return Ok(ReservationOutcome::Cooldown);
         }
         for quota in quotas {
             let amount = quota_amount(quota.kind, estimated_tokens, expected_cost_microusd);
@@ -590,7 +597,7 @@ impl RoutingStore {
                 .optional()?
                 .unwrap_or(0);
             if used.saturating_add(amount) > quota.limit {
-                return Ok(false);
+                return Ok(ReservationOutcome::QuotaExceeded(quota.kind));
             }
         }
         for quota in quotas {
@@ -620,7 +627,7 @@ impl RoutingStore {
         transaction.execute("DELETE FROM session_pins WHERE expires_at < ?1", [now])?;
         transaction.execute("DELETE FROM cooldowns WHERE until_epoch < ?1", [now])?;
         transaction.commit()?;
-        Ok(true)
+        Ok(ReservationOutcome::Reserved)
     }
 
     pub fn apply_cooldown(
@@ -968,7 +975,7 @@ mod tests {
 
     use crate::benchmarks::BenchmarkModel;
 
-    use super::{CatalogRecord, RoutingStore};
+    use super::{CatalogRecord, ReservationOutcome, RoutingStore};
 
     #[test]
     fn catalog_replacement_is_atomic_per_provider() {
@@ -1005,7 +1012,7 @@ mod tests {
         let accepted = handles
             .into_iter()
             .map(|handle| handle.join().expect("thread"))
-            .filter(|accepted| *accepted)
+            .filter(|outcome| *outcome == ReservationOutcome::Reserved)
             .count();
         assert_eq!(accepted, 1);
     }
@@ -1049,10 +1056,11 @@ mod tests {
         store
             .apply_cooldown("provider", "model", Some(60))
             .expect("cooldown");
-        assert!(
-            !store
+        assert_eq!(
+            store
                 .reserve("provider", "model", 1, 0, &[])
-                .expect("reserve")
+                .expect("reserve"),
+            ReservationOutcome::Cooldown
         );
     }
 
@@ -1071,7 +1079,10 @@ mod tests {
                 window_seconds: 60,
             },
         ];
-        assert!(store.reserve("p", "m", 100, 0, &quotas).expect("first"));
+        assert_eq!(
+            store.reserve("p", "m", 100, 0, &quotas).expect("first"),
+            ReservationOutcome::Reserved
+        );
         store
             .release_reservation(
                 "p",
@@ -1082,8 +1093,14 @@ mod tests {
                 super::ReservationRelease::KnownFailure,
             )
             .expect("release tokens");
-        assert!(store.reserve("p", "m", 100, 0, &quotas).expect("second"));
-        assert!(!store.reserve("p", "m", 1, 0, &quotas).expect("third"));
+        assert_eq!(
+            store.reserve("p", "m", 100, 0, &quotas).expect("second"),
+            ReservationOutcome::Reserved
+        );
+        assert_eq!(
+            store.reserve("p", "m", 1, 0, &quotas).expect("third"),
+            ReservationOutcome::QuotaExceeded(QuotaKind::Requests)
+        );
     }
 
     #[test]
@@ -1158,8 +1175,14 @@ mod tests {
             limit: 100,
             window_seconds: 86_400,
         }];
-        assert!(store.reserve("p", "m", 1, 60, &quotas).expect("first"));
-        assert!(!store.reserve("p", "m", 1, 60, &quotas).expect("second"));
+        assert_eq!(
+            store.reserve("p", "m", 1, 60, &quotas).expect("first"),
+            ReservationOutcome::Reserved
+        );
+        assert_eq!(
+            store.reserve("p", "m", 1, 60, &quotas).expect("second"),
+            ReservationOutcome::QuotaExceeded(QuotaKind::CostMicrousd)
+        );
     }
 
     #[test]
@@ -1170,10 +1193,11 @@ mod tests {
             limit: 100,
             window_seconds: 86_400,
         }];
-        assert!(
+        assert_eq!(
             store
                 .reserve("p", "m", 1, 60, &cost_quota)
-                .expect("reserve")
+                .expect("reserve"),
+            ReservationOutcome::Reserved
         );
         store
             .release_reservation(
@@ -1185,10 +1209,11 @@ mod tests {
                 super::ReservationRelease::KnownFailure,
             )
             .expect("release cost");
-        assert!(
+        assert_eq!(
             store
                 .reserve("p", "m", 1, 60, &cost_quota)
-                .expect("cost refunded")
+                .expect("cost refunded"),
+            ReservationOutcome::Reserved
         );
 
         let request_store = RoutingStore::open(None).expect("request store");
@@ -1197,10 +1222,11 @@ mod tests {
             limit: 1,
             window_seconds: 86_400,
         }];
-        assert!(
+        assert_eq!(
             request_store
                 .reserve("p", "m", 1, 0, &request_quota)
-                .expect("reserve")
+                .expect("reserve"),
+            ReservationOutcome::Reserved
         );
         request_store
             .release_reservation(
@@ -1212,10 +1238,11 @@ mod tests {
                 super::ReservationRelease::KnownFailure,
             )
             .expect("release known failure");
-        assert!(
-            !request_store
+        assert_eq!(
+            request_store
                 .reserve("p", "m", 1, 0, &request_quota)
-                .expect("request retained")
+                .expect("request retained"),
+            ReservationOutcome::QuotaExceeded(QuotaKind::Requests)
         );
     }
 }
