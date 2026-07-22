@@ -36,6 +36,7 @@ jobs:
       - run: cargo test --all-features
       - run: cargo build --release
       - run: cargo run -- --help
+      - run: ./scripts/native-smoke.sh
 
   dependencies:
     runs-on: ubuntu-latest

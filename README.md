@@ -68,6 +68,13 @@ The cloud profiles use OpenAI Chat Completions with bearer secrets. They are
 contract-tested against deterministic local fixtures; no provider credential is
 required for the test suite.
 
+## v0.2 Limitations
+
+The gateway supports the OpenAI Chat Completions wire protocol only. It has no
+caller authentication or public/LAN bind, does not retry ambiguous transport
+failures, does not call providers at startup, and has no config hot reload,
+native-protocol adapters, or OAuth-managed credentials.
+
 ## Development
 
 ```bash

@@ -81,7 +81,7 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(provider.connect_timeout_seconds))
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("model-gateway/0.1")
+            .user_agent(concat!("model-gateway/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| GatewayBuildError::Client {
                 provider: name.clone(),
