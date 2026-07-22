@@ -10,7 +10,8 @@ use tracing_subscriber::prelude::*;
 
 use model_gateway::benchmarks::{BenchmarkImport, parse_artificial_analysis};
 use model_gateway::config::{
-    BillingMode, Config, ConfigError, Exposure, ModelConfig, TargetConfig,
+    BillingMode, Config, ConfigError, Exposure, ModelConfig, QuotaBoundary, QuotaKind, QuotaLimit,
+    TargetConfig,
 };
 use model_gateway::gateway::run_server;
 use model_gateway::providers::{
@@ -460,6 +461,39 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
             2 => BillingMode::Subscription,
             _ => BillingMode::Free,
         };
+        if provider.billing_mode != BillingMode::Free {
+            for (label, boundary, window_seconds) in [
+                ("daily", QuotaBoundary::UtcDay, 86_400),
+                ("weekly", QuotaBoundary::UtcWeek, 604_800),
+                ("monthly (30-day)", QuotaBoundary::UtcMonth, 2_592_000),
+            ] {
+                let cap: String = Input::new()
+                    .with_prompt(format!(
+                        "Optional {label} spend cap in currency (blank for none)"
+                    ))
+                    .allow_empty(true)
+                    .interact_text()?;
+                if cap.trim().is_empty() {
+                    continue;
+                }
+                let currency = cap.trim().parse::<f64>().map_err(|_| {
+                    format!("{label} spend cap must be a non-negative decimal currency amount")
+                })?;
+                if !currency.is_finite() || currency <= 0.0 {
+                    return Err(format!("{label} spend cap must be greater than zero").into());
+                }
+                let microusd = currency
+                    .mul_add(1_000_000.0, 0.0)
+                    .ceil()
+                    .clamp(1.0, u64::MAX as f64) as u64;
+                provider.quotas.push(QuotaLimit {
+                    kind: QuotaKind::CostMicrousd,
+                    limit: microusd,
+                    window_seconds,
+                    boundary,
+                });
+            }
+        }
         let mut discovered_models = Vec::new();
         if !args.offline {
             let key = provider.api_key_secret.as_deref().and_then(|name| {
