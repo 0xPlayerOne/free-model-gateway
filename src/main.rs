@@ -13,7 +13,9 @@ use model_gateway::config::{
     BillingMode, Config, ConfigError, Exposure, ModelConfig, TargetConfig,
 };
 use model_gateway::gateway::run_server;
-use model_gateway::providers::{BuiltinProvider, ConnectionCheck, fetch_catalog};
+use model_gateway::providers::{
+    BuiltinProvider, ConnectionCheck, fetch_account_limit, fetch_catalog,
+};
 use model_gateway::routing::{
     CatalogRecord, RoutingStore, is_verified_free, provider_limit_reference,
 };
@@ -234,6 +236,13 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                     })
                     .collect::<Vec<_>>();
                 store.replace_catalog(name, &models)?;
+                if let Some(account) = fetch_account_limit(provider_config, api_key.as_deref())? {
+                    store.record_account_limit(name, &account)?;
+                    println!(
+                        "{name}: account limit remaining={:?}, usage={:?}",
+                        account.remaining, account.usage
+                    );
+                }
                 println!("Refreshed {name}: {} models", models.len());
                 refreshed += 1;
             }
@@ -256,6 +265,13 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                         reference.status, reference.source_url
                     );
                 }
+            }
+            for (provider, fetched_at, limit, usage, remaining, free_tier) in
+                store.account_limit_status()?
+            {
+                println!(
+                    "{provider}: account_limit fetched_at={fetched_at}, limit={limit:?}, usage={usage:?}, remaining={remaining:?}, free_tier={free_tier:?}"
+                );
             }
         }
     }
@@ -675,6 +691,9 @@ fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
                                 })
                                 .collect::<Vec<_>>();
                             store.replace_catalog(name, &records)?;
+                            if let Some(account) = fetch_account_limit(provider, key.as_deref())? {
+                                store.record_account_limit(name, &account)?;
+                            }
                             println!(
                                 "Online provider check passed: {name} ({} models)",
                                 records.len()

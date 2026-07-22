@@ -384,22 +384,50 @@ fn client(provider: &ProviderConfig) -> Result<Client, String> {
 }
 
 fn validate_openrouter_key(provider: &ProviderConfig, api_key: Option<&str>) -> Result<(), String> {
+    fetch_account_limit(provider, api_key)?
+        .map(|_| ())
+        .ok_or_else(|| "OpenRouter API key is required".to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountLimit {
+    pub limit: Option<f64>,
+    pub usage: Option<f64>,
+    pub remaining: Option<f64>,
+    pub is_free_tier: Option<bool>,
+}
+
+pub fn fetch_account_limit(
+    provider: &ProviderConfig,
+    api_key: Option<&str>,
+) -> Result<Option<AccountLimit>, String> {
+    if provider.profile != Some(ProviderProfileId::OpenRouter) {
+        return Ok(None);
+    }
     let api_key = api_key.ok_or_else(|| "OpenRouter API key is required".to_owned())?;
-    let endpoint = format!("{}/auth/key", provider.base_url.trim_end_matches('/'));
+    let endpoint = format!("{}/key", provider.base_url.trim_end_matches('/'));
     let response = client(provider)?
         .get(endpoint)
         .bearer_auth(api_key)
         .header("Accept", "application/json")
         .send()
         .map_err(|error| error.to_string())?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "OpenRouter rejected the API key with HTTP {}",
-            response.status()
-        ))
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "OpenRouter rejected the API key with HTTP {status}"
+        ));
     }
+    let body: serde_json::Value = response.json().map_err(|error| error.to_string())?;
+    let data = body.get("data").unwrap_or(&body);
+    Ok(Some(AccountLimit {
+        limit: number_at(data, "limit"),
+        usage: number_at(data, "usage"),
+        remaining: number_at(data, "limit_remaining"),
+        is_free_tier: data
+            .get("is_free_tier")
+            .and_then(serde_json::Value::as_bool),
+    }))
 }
 
 pub fn fetch_models(
@@ -680,7 +708,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("mock bind");
         let address = listener.local_addr().expect("mock address");
         let server = thread::spawn(move || {
-            for expected_path in ["/v1/auth/key", "/v1/models"] {
+            for expected_path in ["/v1/key", "/v1/models"] {
                 let (mut socket, _) = listener.accept().expect("mock accept");
                 let mut request = vec![0; 4096];
                 let size = socket.read(&mut request).expect("mock read");
@@ -694,7 +722,7 @@ mod tests {
                 let body = if expected_path.ends_with("models") {
                     r#"{"data":[{"id":"fixture-model"}]}"#
                 } else {
-                    r#"{"data":{"label":"fixture"}}"#
+                    r#"{"data":{"label":"fixture","limit":10,"usage":2,"limit_remaining":8,"is_free_tier":true}}"#
                 };
                 write!(
                     socket,
