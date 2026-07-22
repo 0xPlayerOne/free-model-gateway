@@ -68,6 +68,8 @@ pub enum Exposure {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
+    #[serde(default)]
+    pub profile: Option<ProviderProfileId>,
     pub adapter: AdapterKind,
     pub base_url: String,
     #[serde(default)]
@@ -91,6 +93,7 @@ pub struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
+            profile: None,
             adapter: AdapterKind::OpenaiChat,
             base_url: "http://localhost:8000/v1".to_owned(),
             api_key_secret: None,
@@ -103,6 +106,20 @@ impl Default for ProviderConfig {
             stream_idle_timeout_seconds: default_stream_idle_timeout_seconds(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProfileId {
+    Custom,
+    OpenRouter,
+    Ollama,
+    LmStudio,
+    OpenaiApi,
+    Deepseek,
+    Fireworks,
+    Novita,
+    Zai,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -453,6 +470,7 @@ mod tests {
 
     fn provider(base_url: &str) -> ProviderConfig {
         ProviderConfig {
+            profile: None,
             adapter: super::AdapterKind::OpenaiChat,
             base_url: base_url.to_owned(),
             api_key_secret: None,
@@ -554,6 +572,23 @@ mod tests {
                 .insert(header.to_owned(), "metadata".to_owned());
             assert!(config.validate(&SecretResolver::default()).is_err());
         }
+    }
+
+    #[test]
+    fn profile_identity_round_trips_and_legacy_config_defaults_to_none() {
+        let legacy = toml::to_string(&valid_config("http://localhost:11434/v1")).expect("legacy");
+        let legacy_config: Config = toml::from_str(&legacy).expect("legacy config");
+        assert_eq!(legacy_config.providers["local"].profile, None);
+
+        let mut config = valid_config("https://api.openai.com/v1");
+        config.providers.get_mut("local").expect("provider").profile =
+            Some(super::ProviderProfileId::OpenaiApi);
+        let encoded = config.to_toml().expect("encoded config");
+        let decoded: Config = toml::from_str(&encoded).expect("decoded config");
+        assert_eq!(
+            decoded.providers["local"].profile,
+            Some(super::ProviderProfileId::OpenaiApi)
+        );
     }
 
     #[test]

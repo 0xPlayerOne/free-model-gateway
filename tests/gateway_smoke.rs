@@ -135,6 +135,7 @@ fn config_for(providers: BTreeMap<String, ProviderConfig>, targets: Vec<TargetCo
 
 fn provider(base_url: String) -> ProviderConfig {
     ProviderConfig {
+        profile: None,
         base_url,
         ..ProviderConfig::default()
     }

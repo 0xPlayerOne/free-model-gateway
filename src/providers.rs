@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use reqwest::blocking::Client;
 
-use crate::config::{AdapterKind, ProviderConfig};
+use crate::config::{AdapterKind, ProviderConfig, ProviderProfileId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinProvider {
@@ -10,11 +10,151 @@ pub enum BuiltinProvider {
     OpenRouter,
     Ollama,
     LmStudio,
+    OpenaiApi,
+    Deepseek,
+    Fireworks,
+    Novita,
+    Zai,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProfileDefinition {
+    pub id: ProviderProfileId,
+    pub display_name: &'static str,
+    pub adapter: AdapterKind,
+    pub api_key_required: bool,
+    pub default_secret_name: Option<&'static str>,
+    pub native_base_url: &'static str,
+    pub docker_base_url: &'static str,
+    pub suggested_model: &'static str,
 }
 
 impl BuiltinProvider {
     pub fn all() -> &'static [Self] {
-        &[Self::Custom, Self::OpenRouter, Self::Ollama, Self::LmStudio]
+        &[
+            Self::Custom,
+            Self::OpenRouter,
+            Self::Ollama,
+            Self::LmStudio,
+            Self::OpenaiApi,
+            Self::Deepseek,
+            Self::Fireworks,
+            Self::Novita,
+            Self::Zai,
+        ]
+    }
+
+    pub fn definition(self) -> ProfileDefinition {
+        match self {
+            Self::Custom => ProfileDefinition {
+                id: ProviderProfileId::Custom,
+                display_name: "Custom OpenAI-compatible",
+                adapter: AdapterKind::OpenaiChat,
+                api_key_required: false,
+                default_secret_name: None,
+                native_base_url: "http://localhost:8000/v1",
+                docker_base_url: "http://host.docker.internal:8000/v1",
+                suggested_model: "your-model",
+            },
+            Self::OpenRouter => ProfileDefinition {
+                id: ProviderProfileId::OpenRouter,
+                display_name: "OpenRouter",
+                adapter: AdapterKind::OpenaiChat,
+                api_key_required: true,
+                default_secret_name: Some("OPENROUTER_API_KEY"),
+                native_base_url: "https://openrouter.ai/api/v1",
+                docker_base_url: "https://openrouter.ai/api/v1",
+                suggested_model: "openai/gpt-4o-mini",
+            },
+            Self::Ollama => ProfileDefinition {
+                id: ProviderProfileId::Ollama,
+                display_name: "Ollama",
+                adapter: AdapterKind::OpenaiChat,
+                api_key_required: false,
+                default_secret_name: None,
+                native_base_url: "http://localhost:11434/v1",
+                docker_base_url: "http://host.docker.internal:11434/v1",
+                suggested_model: "llama3.2",
+            },
+            Self::LmStudio => ProfileDefinition {
+                id: ProviderProfileId::LmStudio,
+                display_name: "LM Studio",
+                adapter: AdapterKind::OpenaiChat,
+                api_key_required: false,
+                default_secret_name: None,
+                native_base_url: "http://localhost:1234/v1",
+                docker_base_url: "http://host.docker.internal:1234/v1",
+                suggested_model: "local-model",
+            },
+            Self::OpenaiApi => ProfileDefinition {
+                id: ProviderProfileId::OpenaiApi,
+                display_name: "OpenAI API",
+                adapter: AdapterKind::OpenaiChat,
+                api_key_required: true,
+                default_secret_name: Some("OPENAI_API_KEY"),
+                native_base_url: "https://api.openai.com/v1",
+                docker_base_url: "https://api.openai.com/v1",
+                suggested_model: "gpt-4o-mini",
+            },
+            Self::Deepseek => ProfileDefinition {
+                id: ProviderProfileId::Deepseek,
+                display_name: "DeepSeek",
+                adapter: AdapterKind::OpenaiChat,
+                api_key_required: true,
+                default_secret_name: Some("DEEPSEEK_API_KEY"),
+                native_base_url: "https://api.deepseek.com/v1",
+                docker_base_url: "https://api.deepseek.com/v1",
+                suggested_model: "deepseek-chat",
+            },
+            Self::Fireworks => ProfileDefinition {
+                id: ProviderProfileId::Fireworks,
+                display_name: "Fireworks AI",
+                adapter: AdapterKind::OpenaiChat,
+                api_key_required: true,
+                default_secret_name: Some("FIREWORKS_API_KEY"),
+                native_base_url: "https://api.fireworks.ai/inference/v1",
+                docker_base_url: "https://api.fireworks.ai/inference/v1",
+                suggested_model: "accounts/fireworks/models/llama-v3p1-8b-instruct",
+            },
+            Self::Novita => ProfileDefinition {
+                id: ProviderProfileId::Novita,
+                display_name: "Novita AI",
+                adapter: AdapterKind::OpenaiChat,
+                api_key_required: true,
+                default_secret_name: Some("NOVITA_API_KEY"),
+                native_base_url: "https://api.novita.ai/openai/v1",
+                docker_base_url: "https://api.novita.ai/openai/v1",
+                suggested_model: "meta-llama/llama-3.1-8b-instruct",
+            },
+            Self::Zai => ProfileDefinition {
+                id: ProviderProfileId::Zai,
+                display_name: "Z.AI / GLM",
+                adapter: AdapterKind::OpenaiChat,
+                api_key_required: true,
+                default_secret_name: Some("ZAI_API_KEY"),
+                native_base_url: "https://api.z.ai/api/paas/v4",
+                docker_base_url: "https://api.z.ai/api/paas/v4",
+                suggested_model: "glm-4.5",
+            },
+        }
+    }
+
+    pub fn profile_id(self) -> ProviderProfileId {
+        self.definition().id
+    }
+
+    pub fn config_key(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::OpenRouter => "openrouter",
+            Self::Ollama => "ollama",
+            Self::LmStudio => "lmstudio",
+            Self::OpenaiApi => "openai-api",
+            Self::Deepseek => "deepseek",
+            Self::Fireworks => "fireworks",
+            Self::Novita => "novita",
+            Self::Zai => "zai",
+        }
     }
 
     pub fn display_name(self) -> &'static str {
@@ -23,6 +163,11 @@ impl BuiltinProvider {
             Self::OpenRouter => "OpenRouter",
             Self::Ollama => "Ollama",
             Self::LmStudio => "LM Studio",
+            Self::OpenaiApi => "OpenAI API",
+            Self::Deepseek => "DeepSeek",
+            Self::Fireworks => "Fireworks AI",
+            Self::Novita => "Novita AI",
+            Self::Zai => "Z.AI / GLM",
         }
     }
 
@@ -35,11 +180,16 @@ impl BuiltinProvider {
             (Self::OpenRouter, _) => "https://openrouter.ai/api/v1",
             (Self::Ollama, false) => "http://localhost:11434/v1",
             (Self::LmStudio, false) => "http://localhost:1234/v1",
+            (Self::OpenaiApi, _) => "https://api.openai.com/v1",
+            (Self::Deepseek, _) => "https://api.deepseek.com/v1",
+            (Self::Fireworks, _) => "https://api.fireworks.ai/inference/v1",
+            (Self::Novita, _) => "https://api.novita.ai/openai/v1",
+            (Self::Zai, _) => "https://api.z.ai/api/paas/v4",
         }
     }
 
     pub fn needs_api_key(self) -> bool {
-        matches!(self, Self::OpenRouter)
+        self.definition().api_key_required
     }
 
     pub fn suggested_model(self) -> &'static str {
@@ -48,13 +198,19 @@ impl BuiltinProvider {
             Self::OpenRouter => "openai/gpt-4o-mini",
             Self::Ollama => "llama3.2",
             Self::LmStudio => "local-model",
+            Self::OpenaiApi => "gpt-4o-mini",
+            Self::Deepseek => "deepseek-chat",
+            Self::Fireworks => "accounts/fireworks/models/llama-v3p1-8b-instruct",
+            Self::Novita => "meta-llama/llama-3.1-8b-instruct",
+            Self::Zai => "glm-4.5",
         }
     }
 
     pub fn config(self, base_url: String, api_key_secret: Option<String>) -> ProviderConfig {
         let allow_insecure_http = base_url.starts_with("http://host.docker.internal");
         ProviderConfig {
-            adapter: AdapterKind::OpenaiChat,
+            profile: Some(self.profile_id()),
+            adapter: self.definition().adapter,
             base_url,
             api_key_secret,
             allow_insecure_http,
@@ -71,6 +227,25 @@ impl BuiltinProvider {
             validate_openrouter_key(provider, api_key)?;
         }
         fetch_models(provider, api_key)
+    }
+}
+
+pub fn prepare_request(
+    adapter: AdapterKind,
+    request: &mut serde_json::Value,
+    model: &str,
+) -> Result<(), String> {
+    match adapter {
+        AdapterKind::OpenaiChat => {
+            let object = request
+                .as_object_mut()
+                .ok_or_else(|| "upstream request must be a JSON object".to_owned())?;
+            object.insert(
+                "model".to_owned(),
+                serde_json::Value::String(model.to_owned()),
+            );
+            Ok(())
+        }
     }
 }
 
@@ -142,16 +317,21 @@ mod tests {
     use std::thread;
 
     use super::BuiltinProvider;
+    use crate::config::AdapterKind;
 
     #[test]
     fn core_profiles_have_expected_defaults() {
-        assert_eq!(BuiltinProvider::all().len(), 4);
+        assert_eq!(BuiltinProvider::all().len(), 9);
         assert_eq!(
             BuiltinProvider::Ollama.default_base_url(false),
             "http://localhost:11434/v1"
         );
         assert!(BuiltinProvider::OpenRouter.needs_api_key());
         assert!(!BuiltinProvider::LmStudio.needs_api_key());
+        assert_eq!(
+            BuiltinProvider::OpenaiApi.profile_id(),
+            crate::config::ProviderProfileId::OpenaiApi
+        );
     }
 
     #[test]
@@ -160,6 +340,23 @@ mod tests {
         assert_eq!(url, "http://host.docker.internal:11434/v1");
         let config = BuiltinProvider::Ollama.config(url.to_owned(), None);
         assert!(config.allow_insecure_http);
+        assert_eq!(
+            config.profile,
+            Some(crate::config::ProviderProfileId::Ollama)
+        );
+    }
+
+    #[test]
+    fn profile_registry_has_unique_stable_keys_and_adapter_dispatch() {
+        let mut keys = std::collections::BTreeSet::new();
+        for profile in BuiltinProvider::all() {
+            assert!(keys.insert(profile.config_key()));
+            assert_eq!(profile.definition().adapter, AdapterKind::OpenaiChat);
+        }
+        let mut request = serde_json::json!({"model": "alias", "messages": []});
+        super::prepare_request(AdapterKind::OpenaiChat, &mut request, "upstream")
+            .expect("prepare request");
+        assert_eq!(request["model"], "upstream");
     }
 
     #[test]

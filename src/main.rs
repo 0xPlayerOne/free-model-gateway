@@ -127,12 +127,7 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
             .default(0)
             .interact()?;
         let profile = BuiltinProvider::all()[selection];
-        let default_name = match profile {
-            BuiltinProvider::Custom => "custom",
-            BuiltinProvider::OpenRouter => "openrouter",
-            BuiltinProvider::Ollama => "ollama",
-            BuiltinProvider::LmStudio => "lmstudio",
-        };
+        let default_name = profile.config_key();
         let name: String = Input::new()
             .with_prompt("Provider name")
             .default(default_name.to_owned())
@@ -150,10 +145,15 @@ fn setup(args: SetupArgs) -> Result<(), Box<dyn Error>> {
         let secret_name = if needs_api_key {
             let secret_name: String = Input::new()
                 .with_prompt("API key secret name")
-                .default(format!(
-                    "{}_API_KEY",
-                    name.to_ascii_uppercase().replace('-', "_")
-                ))
+                .default(
+                    profile
+                        .definition()
+                        .default_secret_name
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| {
+                            format!("{}_API_KEY", name.to_ascii_uppercase().replace('-', "_"))
+                        }),
+                )
                 .interact_text()?;
             let value = Password::new()
                 .with_prompt("API key (leave empty to keep an available stored value)")

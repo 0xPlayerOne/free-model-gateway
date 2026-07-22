@@ -19,6 +19,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use crate::config::{Config, ProviderConfig, TargetConfig};
+use crate::providers::prepare_request;
 use crate::secrets::{SecretError, SecretResolver};
 
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -352,7 +353,6 @@ async fn chat_completions(
     for target in targets {
         attempts += 1;
         let mut target_request = request.clone();
-        target_request["model"] = Value::String(target.model.clone());
         let Some(provider) = state.providers.get(&target.provider) else {
             last_error = Some((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -362,6 +362,26 @@ async fn chat_completions(
             ));
             continue;
         };
+        if prepare_request(provider.config.adapter, &mut target_request, &target.model).is_err() {
+            drop(global_permit);
+            log_request(
+                &request_id,
+                &model,
+                &target.provider,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                started_at,
+                is_stream,
+                attempts.saturating_sub(1),
+            );
+            return selected_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                request_id,
+                "provider adapter could not prepare the request",
+                &model,
+                &target.provider,
+                attempts,
+            );
+        }
         let provider_permit = match timeout(
             Duration::from_millis(state.config.server.admission_timeout_ms),
             provider.permits.clone().acquire_owned(),
