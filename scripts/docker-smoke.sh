@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 STATE=$(mktemp -d)
+PROVIDER_PORT=${MODEL_GATEWAY_SMOKE_PROVIDER_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}
+GATEWAY_PORT=${MODEL_GATEWAY_SMOKE_GATEWAY_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}
+if [ "$GATEWAY_PORT" = "$PROVIDER_PORT" ]; then
+    GATEWAY_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+fi
 
 cleanup() {
     docker compose -f "$STATE/compose.yml" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -22,7 +27,7 @@ shutdown_grace_seconds = 2
 
 [providers.mock]
 adapter = "openai_chat"
-base_url = "http://host.docker.internal:39001/v1"
+base_url = "http://host.docker.internal:${PROVIDER_PORT}/v1"
 api_key_secret = "MOCK_API_KEY"
 allow_model_passthrough = false
 allow_insecure_http = true
@@ -49,7 +54,7 @@ services:
       MODEL_GATEWAY_CONTAINER_MODE: "1"
       MODEL_GATEWAY_SECRET_DIR: /run/model-gateway/secrets
     ports:
-      - "127.0.0.1:39003:11434"
+       - "127.0.0.1:${GATEWAY_PORT}:11434"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -73,7 +78,7 @@ volumes:
   secrets:
 EOF
 
-MOCK_PROVIDER_API_KEY=fixture-secret python3 "$ROOT/scripts/mock_provider.py" 39001 &
+MOCK_PROVIDER_API_KEY=fixture-secret python3 "$ROOT/scripts/mock_provider.py" "$PROVIDER_PORT" &
 PROVIDER_PID=$!
 trap 'kill "$PROVIDER_PID" 2>/dev/null || true; cleanup' EXIT
 
@@ -82,21 +87,21 @@ docker compose -f "$STATE/compose.yml" --profile setup run --rm --no-deps --entr
 
 docker compose -f "$STATE/compose.yml" up --build --detach
 for _ in $(seq 1 100); do
-    if curl --silent --fail http://127.0.0.1:39003/health/ready >/dev/null; then
+    if curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null; then
         break
     fi
     sleep 0.2
 done
-curl --silent --fail http://127.0.0.1:39003/health/ready >/dev/null
-curl --silent --fail http://127.0.0.1:39003/v1/models \
+curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/health/ready" >/dev/null
+curl --silent --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/models" \
     | python3 -c 'import json,sys; assert json.load(sys.stdin)["data"][0]["id"] == "smoke"'
 
-curl --silent --show-error --fail http://127.0.0.1:39003/v1/chat/completions \
+curl --silent --show-error --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
     -d '{"model":"smoke","messages":[],"tools":[{"type":"function","function":{"name":"fixture"}}]}' \
     | python3 -c 'import json,sys; assert json.load(sys.stdin)["model"] == "upstream-smoke"'
 
-curl --silent --show-error --fail http://127.0.0.1:39003/v1/chat/completions \
+curl --silent --show-error --fail "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
     -d '{"model":"smoke","stream":true,"messages":[]}' \
     | python3 -c 'import sys; assert "data: [DONE]" in sys.stdin.read()'
