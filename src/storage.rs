@@ -16,13 +16,14 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
             ));
         }
     }
-    if let Ok(metadata) = fs::symlink_metadata(path)
-        && !metadata.file_type().is_file()
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "atomic-write destination is not a regular file",
-        ));
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic-write destination is not a regular file",
+            ));
+        }
+        _ => {}
     }
 
     let temporary = temporary_path(path);
