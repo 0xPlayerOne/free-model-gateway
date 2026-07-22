@@ -2,20 +2,56 @@
 bind = "127.0.0.1:11434"
 exposure = "loopback"
 
-[providers.ollama-cloud]
-profile = "ollama_cloud"
+[providers.cerebras]
+profile = "cerebras"
 adapter = "openai_chat"
-base_url = "https://ollama.com/v1"
-api_key_secret = "OLLAMA_API_KEY"
+base_url = "https://api.cerebras.ai/v1"
+api_key_secret = "CEREBRAS_API_KEY"
 
-[providers.cline]
-profile = "cline"
+[providers.deepseek]
+profile = "deepseek"
 adapter = "openai_chat"
-base_url = "https://api.cline.bot/api/v1"
-api_key_secret = "CLINE_API_KEY"
+base_url = "https://api.deepseek.com/v1"
+api_key_secret = "DEEPSEEK_API_KEY"
 
-[models.ollama-cloud]
-targets = [{ provider = "ollama-cloud", model = "qwen3-coder:480b" }]
+[providers.fireworks]
+profile = "fireworks"
+adapter = "openai_chat"
+base_url = "https://api.fireworks.ai/inference/v1"
+api_key_secret = "FIREWORKS_API_KEY"
 
-[models.cline]
-targets = [{ provider = "cline", model = "anthropic/claude-sonnet-4-6" }]
+[providers.mistral]
+profile = "mistral"
+adapter = "openai_chat"
+base_url = "https://api.mistral.ai/v1"
+api_key_secret = "MISTRAL_API_KEY"
+
+[providers.nous-portal]
+profile = "nous_portal"
+adapter = "openai_chat"
+base_url = "https://portal.nousresearch.com/v1"
+api_key_secret = "NOUS_PORTAL_API_KEY"
+
+[providers.nvidia-nim]
+profile = "nvidia_nim"
+adapter = "openai_chat"
+base_url = "https://integrate.api.nvidia.com/v1"
+api_key_secret = "NVIDIA_NIM_API_KEY"
+
+[models.cerebras]
+targets = [{ provider = "cerebras", model = "qwen-3-coder-480b" }]
+
+[models.deepseek]
+targets = [{ provider = "deepseek", model = "deepseek-chat" }]
+
+[models.fireworks]
+targets = [{ provider = "fireworks", model = "accounts/fireworks/models/llama-v3p1-8b-instruct" }]
+
+[models.mistral]
+targets = [{ provider = "mistral", model = "mistral-small-latest" }]
+
+[models.nous-portal]
+targets = [{ provider = "nous-portal", model = "hermes-4-405b" }]
+
+[models.nvidia-nim]
+targets = [{ provider = "nvidia-nim", model = "nvidia/llama-3.1-nemotron-ultra-253b-v1" }]

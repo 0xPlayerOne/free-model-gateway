@@ -14,9 +14,16 @@ set -a
 source "$ENV_FILE"
 set +a
 
-for config in gateway.core.example.toml gateway.secondary.example.toml; do
+failures=0
+for config in gateway.core.example.toml gateway.secondary.example.toml gateway.optional.example.toml; do
     printf 'Checking %s\n' "$config"
-    MODEL_GATEWAY_CONFIG="$ROOT/$config" \
-    MODEL_GATEWAY_SECRET_STORE=environment \
-        cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -- config check --online
+    if ! MODEL_GATEWAY_CONFIG="$ROOT/$config" \
+        MODEL_GATEWAY_SECRET_STORE=environment \
+            cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -- config check --online; then
+        failures=$((failures + 1))
+    fi
 done
+if [ "$failures" -gt 0 ]; then
+    printf '%s configuration group(s) reported failures\n' "$failures" >&2
+    exit 1
+fi

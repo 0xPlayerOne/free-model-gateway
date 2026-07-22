@@ -131,6 +131,8 @@ pub enum ProviderProfileId {
     OrcaRouter,
     OllamaCloud,
     Cline,
+    Gitlawb,
+    SiliconFlow,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -609,8 +611,8 @@ mod tests {
         config
             .validate_structure()
             .expect("CORE provider example must validate");
-        assert_eq!(config.providers.len(), 12);
-        assert_eq!(config.models.len(), 12);
+        assert_eq!(config.providers.len(), 5);
+        assert_eq!(config.models.len(), 5);
         assert!(
             config
                 .providers
@@ -626,8 +628,24 @@ mod tests {
         config
             .validate_structure()
             .expect("secondary provider example must validate");
-        assert_eq!(config.providers.len(), 2);
-        assert_eq!(config.models.len(), 2);
+        assert_eq!(config.providers.len(), 6);
+        assert_eq!(config.models.len(), 6);
+        assert!(
+            config.providers.values().all(|provider| {
+                provider.profile.is_some() && provider.api_key_secret.is_some()
+            })
+        );
+    }
+
+    #[test]
+    fn optional_provider_example_is_structurally_valid() {
+        let config: Config = toml::from_str(include_str!("../gateway.optional.example.toml"))
+            .expect("optional provider example must parse");
+        config
+            .validate_structure()
+            .expect("optional provider example must validate");
+        assert_eq!(config.providers.len(), 6);
+        assert_eq!(config.models.len(), 6);
         assert!(
             config.providers.values().all(|provider| {
                 provider.profile.is_some() && provider.api_key_secret.is_some()

@@ -19,6 +19,7 @@ COPY --from=builder /src/target/release/model-gateway /usr/local/bin/model-gatew
 COPY gateway.example.toml /app/gateway.example.toml
 COPY gateway.core.example.toml /app/gateway.core.example.toml
 COPY gateway.secondary.example.toml /app/gateway.secondary.example.toml
+COPY gateway.optional.example.toml /app/gateway.optional.example.toml
 
 USER model-gateway
 WORKDIR /app

@@ -1,0 +1,57 @@
+[server]
+bind = "127.0.0.1:11434"
+exposure = "loopback"
+
+[providers.cline]
+profile = "cline"
+adapter = "openai_chat"
+base_url = "https://api.cline.bot/api/v1"
+api_key_secret = "CLINE_API_KEY"
+
+[providers.gitlawb]
+profile = "gitlawb"
+adapter = "openai_chat"
+base_url = "https://opengateway.gitlawb.com/v1"
+api_key_secret = "GITLAWB_API_GIT"
+
+[providers.groq]
+profile = "groq"
+adapter = "openai_chat"
+base_url = "https://api.groq.com/openai/v1"
+api_key_secret = "GROQ_API_KEY"
+
+[providers.novita]
+profile = "novita"
+adapter = "openai_chat"
+base_url = "https://api.novita.ai/openai/v1"
+api_key_secret = "NOVITA_INFRA_KEY"
+
+[providers.orcarouter]
+profile = "orca_router"
+adapter = "openai_chat"
+base_url = "https://api.orcarouter.ai/v1"
+api_key_secret = "ORCAROUTER_API_KEY"
+
+[providers.silicon-flow]
+profile = "silicon_flow"
+adapter = "openai_chat"
+base_url = "https://api.siliconflow.com/v1"
+api_key_secret = "SILICON_FLOW_API_KEY"
+
+[models.cline]
+targets = [{ provider = "cline", model = "anthropic/claude-sonnet-4-6" }]
+
+[models.gitlawb]
+targets = [{ provider = "gitlawb", model = "mimo-v2.5-pro" }]
+
+[models.groq]
+targets = [{ provider = "groq", model = "llama-3.3-70b-versatile" }]
+
+[models.novita]
+targets = [{ provider = "novita", model = "meta-llama/llama-3.1-8b-instruct" }]
+
+[models.orcarouter]
+targets = [{ provider = "orcarouter", model = "auto" }]
+
+[models.silicon-flow]
+targets = [{ provider = "silicon-flow", model = "deepseek-ai/DeepSeek-V3" }]

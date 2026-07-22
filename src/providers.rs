@@ -245,6 +245,28 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         suggested_model: "anthropic/claude-sonnet-4-6",
         connection_check: ConnectionCheck::ConfigurationOnly,
     },
+    ProfileDefinition {
+        id: ProviderProfileId::Gitlawb,
+        config_key: "gitlawb",
+        display_name: "Gitlawb OpenGateway",
+        adapter: AdapterKind::OpenaiChat,
+        default_secret_name: Some("GITLAWB_API_GIT"),
+        native_base_url: "https://opengateway.gitlawb.com/v1",
+        docker_base_url: None,
+        suggested_model: "mimo-v2.5-pro",
+        connection_check: ConnectionCheck::ConfigurationOnly,
+    },
+    ProfileDefinition {
+        id: ProviderProfileId::SiliconFlow,
+        config_key: "silicon-flow",
+        display_name: "SiliconFlow",
+        adapter: AdapterKind::OpenaiChat,
+        default_secret_name: Some("SILICON_FLOW_API_KEY"),
+        native_base_url: "https://api.siliconflow.com/v1",
+        docker_base_url: None,
+        suggested_model: "deepseek-ai/DeepSeek-V3",
+        connection_check: ConnectionCheck::OpenAiModels,
+    },
 ];
 
 pub type BuiltinProvider = ProviderProfileId;
@@ -435,6 +457,20 @@ mod tests {
         );
         assert!(BuiltinProvider::OllamaCloud.needs_api_key());
         assert!(BuiltinProvider::Cline.needs_api_key());
+    }
+
+    #[test]
+    fn optional_profiles_have_expected_defaults() {
+        assert_eq!(
+            BuiltinProvider::Gitlawb.default_base_url(false),
+            "https://opengateway.gitlawb.com/v1"
+        );
+        assert_eq!(
+            BuiltinProvider::SiliconFlow.default_base_url(false),
+            "https://api.siliconflow.com/v1"
+        );
+        assert_eq!(BuiltinProvider::Gitlawb.suggested_model(), "mimo-v2.5-pro");
+        assert!(BuiltinProvider::SiliconFlow.needs_api_key());
     }
 
     #[test]

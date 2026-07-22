@@ -62,23 +62,27 @@ credentials, and arbitrary upstream errors are never logged.
 
 ## Supported Profiles
 
-The setup wizard uses one declarative registry for Custom, OpenRouter, Ollama,
-LM Studio, OpenAI API, DeepSeek, Fireworks AI, Novita AI, Z.AI/GLM, Google
-Gemini's OpenAI compatibility endpoint, Kilo Code, OpenCode Zen, Cerebras,
-Mistral, Nous Portal, NVIDIA NIM, Groq, and OrcaRouter. The cloud profiles use
-OpenAI Chat Completions with bearer secrets. They are contract-tested against
-deterministic local fixtures; no provider credential is required for CI.
+The setup wizard uses one declarative registry. Provider recommendations follow
+`.env.example`: CORE profiles are highly encouraged, SECONDARY profiles are
+useful additions, and OPTIONAL profiles are neither fully tested nor
+recommended. The registry currently covers all names in `.env.local`: Google
+Gemini, Kilo Code, Ollama Cloud, OpenCode, OpenRouter, Cerebras, DeepSeek,
+Fireworks, Mistral, Nous Portal, NVIDIA NIM, Cline, Gitlawb OpenGateway, Groq,
+Novita, OrcaRouter, and SiliconFlow. The cloud profiles use OpenAI Chat
+Completions with bearer secrets. They are contract-tested against deterministic
+local fixtures; no provider credential is required for CI.
 
 Secondary profiles add Ollama Cloud and the Cline API using their documented
 OpenAI-compatible endpoints. `GITLAWB_API_GIT` remains intentionally unmapped:
 it does not identify a documented LLM provider endpoint.
 
-`gateway.core.example.toml` configures the CORE providers represented by
-`.env.example`. Run `./scripts/core-provider-check.sh` for an explicit one-time
-connection check with `.env.local`. It checks both CORE and secondary example
-configs, sends only documented model-catalog or key-status GET requests, skips
-providers without a documented zero-credit endpoint, never sends a completion,
-and is intentionally not part of CI.
+`gateway.core.example.toml`, `gateway.secondary.example.toml`, and
+`gateway.optional.example.toml` mirror the three `.env.example` sections. Run
+`./scripts/core-provider-check.sh` for an explicit one-time connection check
+with `.env.local`. It checks all three configs, sends only documented
+model-catalog or key-status GET requests, skips providers without a documented
+zero-credit endpoint, never sends a completion, reports every provider before
+returning a failure summary, and is intentionally not part of CI.
 
 ## v0.2 Limitations
 
