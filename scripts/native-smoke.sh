@@ -43,6 +43,13 @@ EOF
 
 MOCK_PROVIDER_API_KEY=fixture-secret python3 "$ROOT/scripts/mock_provider.py" "$PROVIDER_PORT" &
 PROVIDER_PID=$!
+for _ in $(seq 1 100); do
+    if curl --noproxy '*' --silent --fail "http://127.0.0.1:${PROVIDER_PORT}/v1/models" >/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+curl --noproxy '*' --silent --fail "http://127.0.0.1:${PROVIDER_PORT}/v1/models" >/dev/null
 HOME="$STATE/home" \
 MODEL_GATEWAY_CONFIG="$STATE/config/config.toml" \
 MODEL_GATEWAY_SECRET_STORE=environment \
