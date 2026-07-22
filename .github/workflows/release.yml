@@ -54,6 +54,10 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           test "${GITHUB_REF_NAME#v}" = "$version"
       - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Smoke native binary
+        run: |
+          target/${{ matrix.target }}/release/model-gateway --version
+          target/${{ matrix.target }}/release/model-gateway --help >/dev/null
       - name: Create archive
         shell: bash
         run: |
@@ -81,7 +85,7 @@ jobs:
           pattern: native-*
           path: dist
           merge-multiple: true
-      - run: ./scripts/release-smoke.sh dist
+      - run: RELEASE_SMOKE_EXECUTE_ARCHIVES=0 ./scripts/release-smoke.sh dist
 
   container:
     name: Container release dry-run/publish

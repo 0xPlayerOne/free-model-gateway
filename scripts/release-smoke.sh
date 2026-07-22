@@ -3,6 +3,7 @@ set -euo pipefail
 
 ARCHIVE_DIR=${1:?usage: release-smoke.sh ARCHIVE_DIR [IMAGE]}
 IMAGE=${2:-}
+EXECUTE_ARCHIVES=${RELEASE_SMOKE_EXECUTE_ARCHIVES:-1}
 
 shopt -s nullglob
 archives=("$ARCHIVE_DIR"/*.tar.gz)
@@ -16,8 +17,10 @@ for archive in "${archives[@]:-}"; do
     trap 'rm -rf "$workdir"' RETURN
     tar -xzf "$archive" -C "$workdir"
     test -x "$workdir/model-gateway"
-    "$workdir/model-gateway" --version >/dev/null
-    "$workdir/model-gateway" --help >/dev/null
+    if [ "$EXECUTE_ARCHIVES" = 1 ]; then
+        "$workdir/model-gateway" --version >/dev/null
+        "$workdir/model-gateway" --help >/dev/null
+    fi
     python3 - "$workdir" <<'PY'
 import pathlib
 import sys

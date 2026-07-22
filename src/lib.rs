@@ -15,6 +15,6 @@ mod tests {
 
     #[test]
     fn exposes_package_version() {
-        assert_eq!(VERSION, "0.2.0");
+        assert_eq!(VERSION, "0.2.1");
     }
 }
