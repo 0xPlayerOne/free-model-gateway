@@ -119,57 +119,31 @@ Refresh dynamic provider catalogs explicitly with `model-gateway catalog
 refresh`, and inspect cache age with `model-gateway catalog status`. Override
 the state location with `MODEL_GATEWAY_STATE_PATH`.
 
-Benchmark refresh is also explicit; serving never requests a benchmark site.
-Store `ARTIFICIAL_ANALYSIS_API_KEY` through `model-gateway credentials set
-ARTIFICIAL_ANALYSIS_API_KEY`, then run `model-gateway benchmarks refresh` to
-load the authenticated Artificial Analysis API with required attribution.
-Inspect snapshots with `model-gateway benchmarks status`. Arena automation is
-disabled by its terms, and LLM Stats or DeepSWE/DataCurve data must be supplied
-as a documented/licensed export rather than scraped. Import such normalized
-exports with `model-gateway benchmarks import --file <path>`:
+Benchmark data is required for `auto-efficient` and `auto-frontier` routing.
+Get a free [Artificial Analysis API key](https://artificialanalysis.ai/), then:
 
-```json
-{
-  "source": "licensed-export",
-  "attribution": "Required source attribution",
-  "models": [{
-    "id": "canonical-model-id",
-    "creator": "Creator",
-    "general_quality": 80.0,
-    "coding_quality": 85.0,
-    "agentic_quality": 75.0,
-    "reasoning_quality": 82.0,
-    "input_price_per_million": 1.0,
-    "output_price_per_million": 3.0,
-    "latency_seconds": 0.5,
-    "output_tokens_per_task": 1024,
-    "reasoning_effort": "high",
-    "as_of": "2026-07-22",
-    "harness": "source-harness-v1",
-    "confidence": 0.95
-  }]
-}
+```bash
+model-gateway credentials set ARTIFICIAL_ANALYSIS_API_KEY
 ```
 
-Provider offering IDs map to canonical benchmark IDs only through exact IDs or
-explicit `model_mappings`; similar names are never merged heuristically.
-Imports may provide `raw_metrics` entries with curated metric names and explicit
-`min`/`max` ranges; values are normalized to 0-100 only within that declared
-cohort. Unknown metric names or incomplete ranges are rejected rather than
-flattened into incomparable scores.
-Successful `auto-efficient` responses include fixed classifier, complexity,
-quality-floor, quality, and expected-cost headers without prompt content.
+The server **auto-fetches benchmarks on startup** if the API key is configured
+and no fresh data exists, and keeps it updated on a background schedule
+(default: every ~3.5 days). You can also trigger a refresh manually:
 
-View the currently active, fresh benchmark rankings with:
-
-```text
-GET /v1/rankings?task=general&limit=100
+```bash
+model-gateway benchmarks refresh
 ```
 
-Supported tasks are `general`, `coding`, `agentic`, and `reasoning`. The response
-contains deterministic ranks, normalized scores, prices, latency, provenance,
-confidence, and the active snapshot attribution. It never performs a live
-benchmark fetch; refresh or import snapshots explicitly first.
+This fetches verified quality, pricing, and latency scores for 500+ models with
+required attribution. The `auto-efficient` and `auto-frontier` routes use
+benchmark-backed Pareto selection and fall back only when no benchmarked
+candidate is safely available.
+
+Inspect active snapshots with `model-gateway benchmarks status`, view live
+rankings at `/v1/rankings?task=coding&limit=50`, and delete stale snapshots
+with `model-gateway benchmarks delete <source>`. Supported tasks are `general`,
+`coding`, `agentic`, and `reasoning`. Import from other licensed sources with
+`model-gateway benchmarks import --file <path>`.
 
 ## Supported Profiles
 

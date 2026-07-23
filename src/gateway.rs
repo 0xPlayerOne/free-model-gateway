@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,8 +20,8 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 
 use crate::benchmarks::{
-    BenchmarkModel, Complexity, ScoredCandidate, TaskKind, classify, is_frontier_model,
-    is_preview_model, pareto_rank, quality_for,
+    BenchmarkImport, BenchmarkModel, Complexity, ScoredCandidate, TaskKind, classify,
+    is_frontier_model, is_preview_model, pareto_rank, parse_artificial_analysis, quality_for,
 };
 use crate::config::{BillingMode, Config, ProviderConfig, QuotaKind, TargetConfig};
 use crate::providers::prepare_request;
@@ -196,7 +197,16 @@ pub async fn run_server(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bind: std::net::SocketAddr = config.server.bind.parse()?;
     let shutdown_grace = Duration::from_secs(config.server.shutdown_grace_seconds);
+    let state_path = config.server.state_path.clone();
+    let benchmark_max_age = config.server.benchmark_max_age_seconds;
+    let aa_api_key = secrets.get("ARTIFICIAL_ANALYSIS_API_KEY")?;
     let app = build_app(config, secrets)?;
+
+    // Background benchmark auto-refresh
+    tokio::spawn(async move {
+        auto_refresh_benchmarks(state_path, benchmark_max_age, aa_api_key).await;
+    });
+
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server = axum::serve(listener, app).with_graceful_shutdown(async {
@@ -2791,6 +2801,81 @@ fn error_response(
         .headers_mut()
         .insert(REQUEST_ID_HEADER, header_value(&request_id));
     response
+}
+
+async fn auto_refresh_benchmarks(
+    state_path: Option<PathBuf>,
+    benchmark_max_age_seconds: u64,
+    aa_api_key: Option<String>,
+) {
+    let refresh_interval = Duration::from_secs(benchmark_max_age_seconds.max(3_600) / 2);
+
+    loop {
+        let routing = match RoutingStore::open(state_path.as_deref()) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Benchmark auto-refresh: cannot open routing store: {e}");
+                tokio::time::sleep(Duration::from_secs(3_600)).await;
+                continue;
+            }
+        };
+
+        let needs_refresh = routing
+            .active_benchmark_snapshot(benchmark_max_age_seconds)
+            .ok()
+            .flatten()
+            .is_none();
+
+        if needs_refresh {
+            if let Some(ref key) = aa_api_key {
+                match fetch_aa_benchmarks(&routing, key).await {
+                    Ok(count) => {
+                        tracing::info!("Auto-refreshed {count} benchmark models");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Benchmark auto-refresh failed (will retry): {e}");
+                    }
+                }
+            }
+        }
+
+        tokio::time::sleep(refresh_interval).await;
+    }
+}
+
+async fn fetch_aa_benchmarks(routing: &RoutingStore, api_key: &str) -> Result<usize, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("model-gateway/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body: serde_json::Value = client
+        .get("https://artificialanalysis.ai/api/v2/data/llms/models")
+        .header("x-api-key", api_key)
+        .send()
+        .await
+        .map_err(|e| format!("AA request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("AA request failed: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("AA response parse failed: {e}"))?;
+
+    let models = parse_artificial_analysis(&body)?;
+    let import = BenchmarkImport {
+        source: "artificial-analysis".to_owned(),
+        attribution: "Artificial Analysis (https://artificialanalysis.ai/)".to_owned(),
+        models,
+    }
+    .normalize()?;
+
+    let count = import.models.len();
+    routing
+        .replace_benchmarks(&import.source, &import.attribution, &import.models)
+        .map_err(|e| e.to_string())?;
+    Ok(count)
 }
 
 #[cfg(test)]
