@@ -3,56 +3,64 @@ bind = "127.0.0.1:8008"
 local_base_url = "http://127.0.0.1:8000/v1"
 exposure = "loopback"
 
-[providers.cline]
-profile = "cline"
-adapter = "openai_chat"
-base_url = "https://api.cline.bot/api/v1"
-api_key_secret = "CLINE_API_KEY"
+# Anthropic is intentionally omitted until the native Messages adapter exists.
 
-[providers.gitlawb]
-profile = "gitlawb"
+[providers.deepseek]
+profile = "deepseek"
 adapter = "openai_chat"
-base_url = "https://opengateway.gitlawb.com/v1"
-api_key_secret = "GITLAWB_API_GIT"
+base_url = "https://api.deepseek.com/v1"
+api_key_secret = "DEEPSEEK_API_KEY"
+billing_mode = "paid"
 
-[providers.groq]
-profile = "groq"
+[providers.fireworks]
+profile = "fireworks"
 adapter = "openai_chat"
-base_url = "https://api.groq.com/openai/v1"
-api_key_secret = "GROQ_API_KEY"
+base_url = "https://api.fireworks.ai/inference/v1"
+api_key_secret = "FIREWORKS_API_KEY"
+billing_mode = "paid"
 
-[providers.novita]
-profile = "novita"
+[providers.openai-api]
+profile = "openai_api"
 adapter = "openai_chat"
-base_url = "https://api.novita.ai/openai/v1"
-api_key_secret = "NOVITA_INFRA_KEY"
+base_url = "https://api.openai.com/v1"
+api_key_secret = "OPENAI_API_KEY"
+billing_mode = "paid"
+
+[providers.opencode-go]
+profile = "open_code_go"
+adapter = "openai_chat"
+base_url = "https://opencode.ai/zen/go/v1"
+api_key_secret = "OPENCODE_API_KEY"
+billing_mode = "subscription"
 
 [providers.orcarouter]
 profile = "orca_router"
 adapter = "openai_chat"
 base_url = "https://api.orcarouter.ai/v1"
 api_key_secret = "ORCAROUTER_API_KEY"
+billing_mode = "paid"
 
-[providers.silicon-flow]
-profile = "silicon_flow"
+[providers.zai]
+profile = "zai"
 adapter = "openai_chat"
-base_url = "https://api.siliconflow.com/v1"
-api_key_secret = "SILICON_FLOW_API_KEY"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_secret = "ZAI_API_KEY"
+billing_mode = "paid"
 
-[models.cline]
-targets = [{ provider = "cline", model = "anthropic/claude-sonnet-4-6" }]
+[models.deepseek]
+targets = [{ provider = "deepseek", model = "deepseek-chat" }]
 
-[models.gitlawb]
-targets = [{ provider = "gitlawb", model = "mimo-v2.5-pro" }]
+[models.fireworks]
+targets = [{ provider = "fireworks", model = "accounts/fireworks/models/llama-v3p1-8b-instruct" }]
 
-[models.groq]
-targets = [{ provider = "groq", model = "llama-3.3-70b-versatile" }]
+[models.openai-api]
+targets = [{ provider = "openai-api", model = "gpt-4o-mini" }]
 
-[models.novita]
-targets = [{ provider = "novita", model = "meta-llama/llama-3.1-8b-instruct" }]
+[models.opencode-go]
+targets = [{ provider = "opencode-go", model = "kimi-k3" }]
 
 [models.orcarouter]
 targets = [{ provider = "orcarouter", model = "auto" }]
 
-[models.silicon-flow]
-targets = [{ provider = "silicon-flow", model = "deepseek-ai/DeepSeek-V3" }]
+[models.zai]
+targets = [{ provider = "zai", model = "glm-4.5" }]

@@ -144,11 +144,11 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         native_base_url: "https://api.kilo.ai/api/gateway",
         docker_base_url: None,
         suggested_model: "anthropic/claude-sonnet-4.5",
-        connection_check: ConnectionCheck::ConfigurationOnly,
+        connection_check: ConnectionCheck::OpenAiModels,
     },
     ProfileDefinition {
         id: ProviderProfileId::OpenCode,
-        config_key: "opencode",
+        config_key: "opencode-zen",
         display_name: "OpenCode Zen",
         adapter: AdapterKind::OpenaiChat,
         default_secret_name: Some("OPENCODE_API_KEY"),
@@ -158,15 +158,15 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         connection_check: ConnectionCheck::OpenAiModels,
     },
     ProfileDefinition {
-        id: ProviderProfileId::Cerebras,
-        config_key: "cerebras",
-        display_name: "Cerebras",
+        id: ProviderProfileId::OpenCodeGo,
+        config_key: "opencode-go",
+        display_name: "OpenCode Go",
         adapter: AdapterKind::OpenaiChat,
-        default_secret_name: Some("CEREBRAS_API_KEY"),
-        native_base_url: "https://api.cerebras.ai/v1",
+        default_secret_name: Some("OPENCODE_API_KEY"),
+        native_base_url: "https://opencode.ai/zen/go/v1",
         docker_base_url: None,
-        suggested_model: "qwen-3-coder-480b",
-        connection_check: ConnectionCheck::ConfigurationOnly,
+        suggested_model: "kimi-k3",
+        connection_check: ConnectionCheck::OpenAiModels,
     },
     ProfileDefinition {
         id: ProviderProfileId::Mistral,
@@ -185,10 +185,10 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         display_name: "Nous Portal",
         adapter: AdapterKind::OpenaiChat,
         default_secret_name: Some("NOUS_PORTAL_API_KEY"),
-        native_base_url: "https://portal.nousresearch.com/v1",
+        native_base_url: "https://inference-api.nousresearch.com/v1",
         docker_base_url: None,
         suggested_model: "hermes-4-405b",
-        connection_check: ConnectionCheck::ConfigurationOnly,
+        connection_check: ConnectionCheck::OpenAiModels,
     },
     ProfileDefinition {
         id: ProviderProfileId::NvidiaNim,
@@ -233,28 +233,6 @@ pub const PROFILE_DEFINITIONS: &[ProfileDefinition] = &[
         docker_base_url: None,
         suggested_model: "qwen3-coder:480b",
         connection_check: ConnectionCheck::OpenAiModels,
-    },
-    ProfileDefinition {
-        id: ProviderProfileId::Cline,
-        config_key: "cline",
-        display_name: "Cline API",
-        adapter: AdapterKind::OpenaiChat,
-        default_secret_name: Some("CLINE_API_KEY"),
-        native_base_url: "https://api.cline.bot/api/v1",
-        docker_base_url: None,
-        suggested_model: "anthropic/claude-sonnet-4-6",
-        connection_check: ConnectionCheck::ConfigurationOnly,
-    },
-    ProfileDefinition {
-        id: ProviderProfileId::Gitlawb,
-        config_key: "gitlawb",
-        display_name: "Gitlawb OpenGateway",
-        adapter: AdapterKind::OpenaiChat,
-        default_secret_name: Some("GITLAWB_API_GIT"),
-        native_base_url: "https://opengateway.gitlawb.com/v1",
-        docker_base_url: None,
-        suggested_model: "mimo-v2.5-pro",
-        connection_check: ConnectionCheck::ConfigurationOnly,
     },
     ProfileDefinition {
         id: ProviderProfileId::SiliconFlow,
@@ -468,6 +446,9 @@ pub fn fetch_catalog(
         .iter()
         .filter_map(|item| {
             let id = item.get("id").and_then(serde_json::Value::as_str)?;
+            if is_embedding_model(id) {
+                return None;
+            }
             let pricing = item.get("pricing");
             let input = pricing.and_then(|pricing| {
                 number_at(pricing, "prompt")
@@ -516,6 +497,25 @@ pub fn fetch_catalog(
         .collect())
 }
 
+pub fn is_embedding_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    tokens
+        .iter()
+        .any(|token| matches!(*token, "embed" | "embeddings" | "embedding"))
+        || normalized.contains("text-embedding")
+        || normalized.contains("mistral-embed")
+        || normalized.contains("jina-embeddings")
+        || normalized.contains("nomic-embed")
+        || normalized.contains("nv-embed")
+        || normalized.contains("bge-")
+        || normalized.contains("gte-")
+        || normalized.contains("e5-")
+}
+
 fn number_at(value: &serde_json::Value, key: &str) -> Option<f64> {
     let value = value.get(key)?;
     value
@@ -529,7 +529,9 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
-    use super::{BuiltinProvider, CatalogModel, PROFILE_DEFINITIONS, number_at};
+    use super::{
+        BuiltinProvider, CatalogModel, PROFILE_DEFINITIONS, is_embedding_model, number_at,
+    };
     use crate::config::AdapterKind;
 
     #[test]
@@ -553,25 +555,23 @@ mod tests {
             BuiltinProvider::OllamaCloud.default_base_url(false),
             "https://ollama.com/v1"
         );
-        assert_eq!(
-            BuiltinProvider::Cline.default_base_url(false),
-            "https://api.cline.bot/api/v1"
-        );
         assert!(BuiltinProvider::OllamaCloud.needs_api_key());
-        assert!(BuiltinProvider::Cline.needs_api_key());
+        assert_eq!(
+            BuiltinProvider::OpenCodeGo.default_base_url(false),
+            "https://opencode.ai/zen/go/v1"
+        );
+        assert_eq!(
+            BuiltinProvider::OpenCodeGo.definition().default_secret_name,
+            Some("OPENCODE_API_KEY")
+        );
     }
 
     #[test]
     fn optional_profiles_have_expected_defaults() {
         assert_eq!(
-            BuiltinProvider::Gitlawb.default_base_url(false),
-            "https://opengateway.gitlawb.com/v1"
-        );
-        assert_eq!(
             BuiltinProvider::SiliconFlow.default_base_url(false),
             "https://api.siliconflow.com/v1"
         );
-        assert_eq!(BuiltinProvider::Gitlawb.suggested_model(), "mimo-v2.5-pro");
         assert!(BuiltinProvider::SiliconFlow.needs_api_key());
     }
 
@@ -592,6 +592,25 @@ mod tests {
             output_price_per_million: None,
         };
         assert!(model.zero_priced);
+    }
+
+    #[test]
+    fn embedding_model_detection_covers_common_provider_names() {
+        for model in [
+            "text-embedding-3-small",
+            "models/gemini-embedding-001",
+            "mistral-embed",
+            "nvidia/nv-embedqa-e5-v5",
+            "BAAI/bge-large-en-v1.5",
+            "thenlper/gte-large",
+        ] {
+            assert!(
+                is_embedding_model(model),
+                "expected embedding model: {model}"
+            );
+        }
+        assert!(!is_embedding_model("gemini-2.5-flash"));
+        assert!(!is_embedding_model("llama-3.3-70b-versatile"));
     }
 
     #[test]

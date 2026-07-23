@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+use crate::providers::PROFILE_DEFINITIONS;
 use crate::secrets::{SecretError, SecretResolver, validate_secret_name};
 use crate::storage::write_atomic;
 
@@ -132,7 +133,7 @@ pub struct ProviderConfig {
     pub quotas: Vec<QuotaLimit>,
     #[serde(default)]
     pub model_mappings: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub allow_preview_models: bool,
 }
 
@@ -157,7 +158,7 @@ impl Default for ProviderConfig {
             model_denylist: Vec::new(),
             quotas: Vec::new(),
             model_mappings: BTreeMap::new(),
-            allow_preview_models: false,
+            allow_preview_models: true,
         }
     }
 }
@@ -217,15 +218,13 @@ pub enum ProviderProfileId {
     GoogleGemini,
     KiloCode,
     OpenCode,
-    Cerebras,
+    OpenCodeGo,
     Mistral,
     NousPortal,
     NvidiaNim,
     Groq,
     OrcaRouter,
     OllamaCloud,
-    Cline,
-    Gitlawb,
     SiliconFlow,
 }
 
@@ -286,17 +285,23 @@ impl Config {
     }
 
     pub fn load(path: impl AsRef<Path>, secrets: &SecretResolver) -> Result<Self, ConfigError> {
-        let mut config = Self::read(path)?;
+        let mut config = match Self::read(path) {
+            Ok(config) => config,
+            Err(ConfigError::Missing(_)) => Self::default(),
+            Err(error) => return Err(error),
+        };
         config.apply_environment_overrides(
             env::var("MODEL_GATEWAY_BIND").ok().as_deref(),
             env::var("MODEL_GATEWAY_LOCAL_BASE_URL").ok().as_deref(),
             env::var("MODEL_GATEWAY_LOCAL_MODEL").ok().as_deref(),
         )?;
+        apply_server_environment_overrides(&mut config.server)?;
         if let Some(path) = env::var_os("MODEL_GATEWAY_STATE_PATH") {
             config.server.state_path = Some(PathBuf::from(path));
         } else if config.server.state_path.is_none() {
             config.server.state_path = Some(home_dir().join("routing.sqlite3"));
         }
+        discover_environment_providers(&mut config, secrets)?;
         apply_provider_environment_overrides(&mut config)?;
         config.validate(secrets)?;
         Ok(config)
@@ -455,24 +460,26 @@ impl Config {
 fn apply_provider_environment_overrides(config: &mut Config) -> Result<(), ConfigError> {
     for (name, provider) in &mut config.providers {
         let suffix = provider_environment_suffix(name);
-        let variable = format!("MODEL_GATEWAY_{suffix}_BILLING_MODE");
-        if let Ok(value) = env::var(&variable) {
+        let variable = |field| format!("MODEL_GATEWAY_{suffix}_{field}");
+
+        let billing_variable = variable("BILLING_MODE");
+        if let Ok(value) = env::var(&billing_variable) {
             provider.billing_mode = match value.as_str() {
                 "free" => BillingMode::Free,
                 "paid" => BillingMode::Paid,
                 "subscription" => BillingMode::Subscription,
                 _ => {
                     return Err(ConfigError::Invalid(format!(
-                        "{variable} must be free, paid, or subscription"
+                        "{billing_variable} must be free, paid, or subscription"
                     )));
                 }
             };
         }
-        let variable = format!("MODEL_GATEWAY_{suffix}_ACCOUNT_SCOPE");
-        if let Ok(value) = env::var(&variable) {
+        let account_scope_variable = variable("ACCOUNT_SCOPE");
+        if let Ok(value) = env::var(&account_scope_variable) {
             if value.trim().is_empty() || value.len() > 256 {
                 return Err(ConfigError::Invalid(format!(
-                    "{variable} must be 1-256 non-whitespace characters"
+                    "{account_scope_variable} must be 1-256 non-whitespace characters"
                 )));
             }
             provider.account_scope = Some(value);
@@ -482,8 +489,8 @@ fn apply_provider_environment_overrides(config: &mut Config) -> Result<(), Confi
             ("MODEL_ALLOWLIST", &mut provider.model_allowlist),
             ("MODEL_DENYLIST", &mut provider.model_denylist),
         ] {
-            let variable = format!("MODEL_GATEWAY_{suffix}_{suffix_name}");
-            if let Ok(value) = env::var(&variable) {
+            let list_variable = variable(suffix_name);
+            if let Ok(value) = env::var(&list_variable) {
                 *destination = value
                     .split(',')
                     .map(str::trim)
@@ -492,20 +499,317 @@ fn apply_provider_environment_overrides(config: &mut Config) -> Result<(), Confi
                     .collect();
             }
         }
-        let variable = format!("MODEL_GATEWAY_{suffix}_ALLOW_PREVIEW_MODELS");
-        if let Ok(value) = env::var(&variable) {
-            provider.allow_preview_models = match value.as_str() {
-                "1" | "true" | "yes" => true,
-                "0" | "false" | "no" => false,
-                _ => {
-                    return Err(ConfigError::Invalid(format!(
-                        "{variable} must be true or false"
-                    )));
-                }
+        let preview_variable = variable("ALLOW_PREVIEW_MODELS");
+        apply_env_bool(&preview_variable, &mut provider.allow_preview_models)?;
+
+        let base_url_variable = variable("BASE_URL");
+        if let Ok(value) = env::var(&base_url_variable) {
+            provider.base_url = value;
+        }
+        let secret_variable = variable("API_KEY_SECRET");
+        if let Ok(value) = env::var(&secret_variable) {
+            validate_secret_name(&value).map_err(|error| {
+                ConfigError::Invalid(format!("{secret_variable} is invalid: {error}"))
+            })?;
+            provider.api_key_secret = Some(value);
+        }
+        let passthrough_variable = variable("ALLOW_MODEL_PASSTHROUGH");
+        apply_env_bool(&passthrough_variable, &mut provider.allow_model_passthrough)?;
+        let insecure_variable = variable("ALLOW_INSECURE_HTTP");
+        apply_env_bool(&insecure_variable, &mut provider.allow_insecure_http)?;
+        let max_in_flight_variable = variable("MAX_IN_FLIGHT");
+        if let Ok(value) = env::var(&max_in_flight_variable) {
+            provider.max_in_flight = if value.eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(value.parse().map_err(|_| {
+                    ConfigError::Invalid(format!(
+                        "{max_in_flight_variable} must be none or a non-negative integer"
+                    ))
+                })?)
             };
+        }
+        apply_env_u64(
+            &variable("CONNECT_TIMEOUT_SECONDS"),
+            &mut provider.connect_timeout_seconds,
+        )?;
+        apply_env_u64(
+            &variable("RESPONSE_HEADER_TIMEOUT_SECONDS"),
+            &mut provider.response_header_timeout_seconds,
+        )?;
+        apply_env_u64(
+            &variable("STREAM_IDLE_TIMEOUT_SECONDS"),
+            &mut provider.stream_idle_timeout_seconds,
+        )?;
+        apply_env_extra_headers(&variable("EXTRA_HEADERS"), &mut provider.extra_headers)?;
+        apply_env_model_mappings(&variable("MODEL_MAPPINGS"), &mut provider.model_mappings)?;
+        apply_env_quotas(&variable("QUOTAS"), &mut provider.quotas)?;
+    }
+    Ok(())
+}
+
+fn apply_env_extra_headers(
+    name: &str,
+    destination: &mut BTreeMap<String, String>,
+) -> Result<(), ConfigError> {
+    let Ok(value) = env::var(name) else {
+        return Ok(());
+    };
+    let mut headers = BTreeMap::new();
+    for entry in value.split(',').filter(|entry| !entry.trim().is_empty()) {
+        let (header, header_value) = entry.split_once('=').ok_or_else(|| {
+            ConfigError::Invalid(format!("{name} entries must use Header=Value format"))
+        })?;
+        if header.trim().is_empty() || header_value.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "{name} entries must have non-empty names and values"
+            )));
+        }
+        headers.insert(header.trim().to_owned(), header_value.trim().to_owned());
+    }
+    *destination = headers;
+    Ok(())
+}
+
+fn apply_env_model_mappings(
+    name: &str,
+    destination: &mut BTreeMap<String, String>,
+) -> Result<(), ConfigError> {
+    let Ok(value) = env::var(name) else {
+        return Ok(());
+    };
+    let mut mappings = BTreeMap::new();
+    for entry in value.split(',').filter(|entry| !entry.trim().is_empty()) {
+        let (source, target) = entry.split_once('=').ok_or_else(|| {
+            ConfigError::Invalid(format!("{name} entries must use source=target format"))
+        })?;
+        if source.trim().is_empty() || target.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "{name} entries must have non-empty source and target models"
+            )));
+        }
+        mappings.insert(source.trim().to_owned(), target.trim().to_owned());
+    }
+    *destination = mappings;
+    Ok(())
+}
+
+fn apply_env_quotas(name: &str, destination: &mut Vec<QuotaLimit>) -> Result<(), ConfigError> {
+    let Ok(value) = env::var(name) else {
+        return Ok(());
+    };
+    let mut quotas = Vec::new();
+    for entry in value.split(';').filter(|entry| !entry.trim().is_empty()) {
+        let parts: Vec<_> = entry.split(':').map(str::trim).collect();
+        if !(3..=4).contains(&parts.len()) {
+            return Err(ConfigError::Invalid(format!(
+                "{name} entries must use kind:limit:window_seconds[:boundary] format"
+            )));
+        }
+        let kind = match parts[0] {
+            "requests" => QuotaKind::Requests,
+            "tokens" => QuotaKind::Tokens,
+            "cost_microusd" => QuotaKind::CostMicrousd,
+            "concurrency" => QuotaKind::Concurrency,
+            _ => {
+                return Err(ConfigError::Invalid(format!(
+                    "{name} has unknown quota kind '{}'",
+                    parts[0]
+                )));
+            }
+        };
+        let limit = parts[1].parse().map_err(|_| {
+            ConfigError::Invalid(format!("{name} quota limit must be a non-negative integer"))
+        })?;
+        let window_seconds = parts[2].parse().map_err(|_| {
+            ConfigError::Invalid(format!(
+                "{name} quota window_seconds must be a non-negative integer"
+            ))
+        })?;
+        let boundary = match parts.get(3).copied().unwrap_or("rolling") {
+            "rolling" => QuotaBoundary::Rolling,
+            "utc_minute" => QuotaBoundary::UtcMinute,
+            "utc_hour" => QuotaBoundary::UtcHour,
+            "utc_day" => QuotaBoundary::UtcDay,
+            "utc_week" => QuotaBoundary::UtcWeek,
+            "utc_month" => QuotaBoundary::UtcMonth,
+            _ => {
+                return Err(ConfigError::Invalid(format!(
+                    "{name} has an unknown quota boundary"
+                )));
+            }
+        };
+        quotas.push(QuotaLimit {
+            kind,
+            limit,
+            window_seconds,
+            boundary,
+        });
+    }
+    *destination = quotas;
+    Ok(())
+}
+
+fn discover_environment_providers(
+    config: &mut Config,
+    secrets: &SecretResolver,
+) -> Result<(), ConfigError> {
+    for definition in PROFILE_DEFINITIONS {
+        let Some(secret_name) = definition.default_secret_name else {
+            continue;
+        };
+        if secrets
+            .get(secret_name)?
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            continue;
+        }
+
+        let provider_name = definition.config_key.to_owned();
+        let was_present = config.providers.contains_key(&provider_name);
+        let provider = config
+            .providers
+            .entry(provider_name)
+            .or_insert_with(|| ProviderConfig {
+                profile: Some(definition.id),
+                adapter: definition.adapter,
+                base_url: definition.native_base_url.to_owned(),
+                api_key_secret: Some(secret_name.to_owned()),
+                ..ProviderConfig::default()
+            });
+        if provider.api_key_secret.is_none() {
+            provider.api_key_secret = Some(secret_name.to_owned());
+        }
+        if !was_present {
+            provider.billing_mode = default_billing_mode(definition.id);
         }
     }
     Ok(())
+}
+
+fn default_billing_mode(profile: ProviderProfileId) -> BillingMode {
+    match profile {
+        ProviderProfileId::Deepseek
+        | ProviderProfileId::Fireworks
+        | ProviderProfileId::OpenaiApi
+        | ProviderProfileId::OrcaRouter
+        | ProviderProfileId::Zai => BillingMode::Paid,
+        ProviderProfileId::OpenCodeGo => BillingMode::Subscription,
+        _ => BillingMode::Free,
+    }
+}
+
+fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), ConfigError> {
+    apply_env_string(
+        "MODEL_GATEWAY_EXPOSURE",
+        &mut server.exposure,
+        |value| match value {
+            "loopback" => Ok(Exposure::Loopback),
+            "local_container" => Ok(Exposure::LocalContainer),
+            _ => Err("must be loopback or local_container".to_owned()),
+        },
+    )?;
+    apply_env_usize("MODEL_GATEWAY_MAX_BODY_BYTES", &mut server.max_body_bytes)?;
+    apply_env_usize("MODEL_GATEWAY_MAX_IN_FLIGHT", &mut server.max_in_flight)?;
+    apply_env_u64(
+        "MODEL_GATEWAY_ADMISSION_TIMEOUT_MS",
+        &mut server.admission_timeout_ms,
+    )?;
+    apply_env_u64(
+        "MODEL_GATEWAY_SHUTDOWN_GRACE_SECONDS",
+        &mut server.shutdown_grace_seconds,
+    )?;
+    apply_env_u64(
+        "MODEL_GATEWAY_LOCAL_MODEL_CACHE_SECONDS",
+        &mut server.local_model_cache_seconds,
+    )?;
+    apply_env_u64(
+        "MODEL_GATEWAY_CATALOG_MAX_AGE_SECONDS",
+        &mut server.catalog_max_age_seconds,
+    )?;
+    apply_env_u64(
+        "MODEL_GATEWAY_BENCHMARK_MAX_AGE_SECONDS",
+        &mut server.benchmark_max_age_seconds,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_QUALITY_FLOOR_SIMPLE",
+        &mut server.quality_floor_simple,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_QUALITY_FLOOR_MEDIUM",
+        &mut server.quality_floor_medium,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_QUALITY_FLOOR_COMPLEX",
+        &mut server.quality_floor_complex,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR_SIMPLE",
+        &mut server.frontier_quality_floor_simple,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR_MEDIUM",
+        &mut server.frontier_quality_floor_medium,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR_COMPLEX",
+        &mut server.frontier_quality_floor_complex,
+    )?;
+    apply_env_bool(
+        "MODEL_GATEWAY_AUTO_FRONTIER_ENABLED",
+        &mut server.auto_frontier_enabled,
+    )?;
+    apply_env_bool(
+        "MODEL_GATEWAY_AUTO_FREE_ENABLED",
+        &mut server.auto_free_enabled,
+    )?;
+    apply_env_bool(
+        "MODEL_GATEWAY_AUTO_EFFICIENT_ENABLED",
+        &mut server.auto_efficient_enabled,
+    )?;
+    Ok(())
+}
+
+fn apply_env_string<T>(
+    name: &str,
+    destination: &mut T,
+    parse: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<(), ConfigError> {
+    if let Ok(value) = env::var(name) {
+        *destination =
+            parse(&value).map_err(|message| ConfigError::Invalid(format!("{name} {message}")))?;
+    }
+    Ok(())
+}
+
+fn apply_env_bool(name: &str, destination: &mut bool) -> Result<(), ConfigError> {
+    apply_env_string(name, destination, |value| match value {
+        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        _ => Err("must be true or false".to_owned()),
+    })
+}
+
+fn apply_env_usize(name: &str, destination: &mut usize) -> Result<(), ConfigError> {
+    apply_env_string(name, destination, |value| {
+        value
+            .parse()
+            .map_err(|_| "must be a non-negative integer".to_owned())
+    })
+}
+
+fn apply_env_u64(name: &str, destination: &mut u64) -> Result<(), ConfigError> {
+    apply_env_string(name, destination, |value| {
+        value
+            .parse()
+            .map_err(|_| "must be a non-negative integer".to_owned())
+    })
+}
+
+fn apply_env_f64(name: &str, destination: &mut f64) -> Result<(), ConfigError> {
+    apply_env_string(name, destination, |value| {
+        value.parse().map_err(|_| "must be a number".to_owned())
+    })
 }
 
 fn provider_environment_suffix(name: &str) -> String {
@@ -932,6 +1236,23 @@ mod tests {
     }
 
     #[test]
+    fn optional_paid_profiles_have_paid_defaults() {
+        for profile in [
+            super::ProviderProfileId::Deepseek,
+            super::ProviderProfileId::Fireworks,
+            super::ProviderProfileId::OpenaiApi,
+            super::ProviderProfileId::OrcaRouter,
+            super::ProviderProfileId::Zai,
+        ] {
+            assert_eq!(super::default_billing_mode(profile), BillingMode::Paid);
+        }
+        assert_eq!(
+            super::default_billing_mode(super::ProviderProfileId::OpenCodeGo),
+            BillingMode::Subscription
+        );
+    }
+
+    #[test]
     fn validates_typed_quota_overrides() {
         let mut config = valid_config("https://example.com/v1");
         config.providers.get_mut("local").expect("provider").quotas = vec![QuotaLimit {
@@ -1117,7 +1438,7 @@ mod tests {
             config.server.frontier_quality_floor_simple
                 < config.server.frontier_quality_floor_complex
         );
-        assert!(!openrouter.allow_preview_models);
+        assert!(openrouter.allow_preview_models);
     }
 
     #[test]

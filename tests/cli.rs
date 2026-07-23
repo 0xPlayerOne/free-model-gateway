@@ -21,6 +21,34 @@ fn credential_list_succeeds_before_configuration_exists() {
 }
 
 #[test]
+fn config_check_discovers_environment_providers_without_setup() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_model-gateway"))
+        .args(["config", "check"])
+        .env(
+            "MODEL_GATEWAY_CONFIG",
+            directory.path().join("missing.toml"),
+        )
+        .env(
+            "MODEL_GATEWAY_STATE_PATH",
+            directory.path().join("routing.sqlite3"),
+        )
+        .env("MODEL_GATEWAY_SECRET_STORE", "environment")
+        .env("OPENROUTER_API_KEY", "test-openrouter-key")
+        .env("MODEL_GATEWAY_OPENROUTER_BILLING_MODE", "paid")
+        .env(
+            "MODEL_GATEWAY_OPENROUTER_MODEL_ALLOWLIST",
+            "openai/gpt-4o-mini",
+        )
+        .output()
+        .expect("run config check");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("Providers: 1"));
+    assert!(stdout.contains("Aliases: 0"));
+}
+
+#[test]
 fn config_show_prints_canonical_non_secret_configuration() {
     let directory = tempfile::tempdir().expect("tempdir");
     let config_path = directory.path().join("config.toml");

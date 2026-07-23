@@ -3,24 +3,6 @@ bind = "127.0.0.1:8008"
 local_base_url = "http://127.0.0.1:8000/v1"
 exposure = "loopback"
 
-[providers.cerebras]
-profile = "cerebras"
-adapter = "openai_chat"
-base_url = "https://api.cerebras.ai/v1"
-api_key_secret = "CEREBRAS_API_KEY"
-
-[providers.deepseek]
-profile = "deepseek"
-adapter = "openai_chat"
-base_url = "https://api.deepseek.com/v1"
-api_key_secret = "DEEPSEEK_API_KEY"
-
-[providers.fireworks]
-profile = "fireworks"
-adapter = "openai_chat"
-base_url = "https://api.fireworks.ai/inference/v1"
-api_key_secret = "FIREWORKS_API_KEY"
-
 [providers.mistral]
 profile = "mistral"
 adapter = "openai_chat"
@@ -30,7 +12,7 @@ api_key_secret = "MISTRAL_API_KEY"
 [providers.nous-portal]
 profile = "nous_portal"
 adapter = "openai_chat"
-base_url = "https://portal.nousresearch.com/v1"
+base_url = "https://inference-api.nousresearch.com/v1"
 api_key_secret = "NOUS_PORTAL_API_KEY"
 
 [providers.nvidia-nim]
@@ -39,14 +21,23 @@ adapter = "openai_chat"
 base_url = "https://integrate.api.nvidia.com/v1"
 api_key_secret = "NVIDIA_NIM_API_KEY"
 
-[models.cerebras]
-targets = [{ provider = "cerebras", model = "qwen-3-coder-480b" }]
+[providers.groq]
+profile = "groq"
+adapter = "openai_chat"
+base_url = "https://api.groq.com/openai/v1"
+api_key_secret = "GROQ_API_KEY"
 
-[models.deepseek]
-targets = [{ provider = "deepseek", model = "deepseek-chat" }]
+[providers.novita]
+profile = "novita"
+adapter = "openai_chat"
+base_url = "https://api.novita.ai/openai/v1"
+api_key_secret = "NOVITA_INFRA_KEY"
 
-[models.fireworks]
-targets = [{ provider = "fireworks", model = "accounts/fireworks/models/llama-v3p1-8b-instruct" }]
+[providers.silicon-flow]
+profile = "silicon_flow"
+adapter = "openai_chat"
+base_url = "https://api.siliconflow.com/v1"
+api_key_secret = "SILICON_FLOW_API_KEY"
 
 [models.mistral]
 targets = [{ provider = "mistral", model = "mistral-small-latest" }]
@@ -56,3 +47,12 @@ targets = [{ provider = "nous-portal", model = "hermes-4-405b" }]
 
 [models.nvidia-nim]
 targets = [{ provider = "nvidia-nim", model = "nvidia/llama-3.1-nemotron-ultra-253b-v1" }]
+
+[models.groq]
+targets = [{ provider = "groq", model = "llama-3.3-70b-versatile" }]
+
+[models.novita]
+targets = [{ provider = "novita", model = "meta-llama/llama-3.1-8b-instruct" }]
+
+[models.silicon-flow]
+targets = [{ provider = "silicon-flow", model = "deepseek-ai/DeepSeek-V3" }]

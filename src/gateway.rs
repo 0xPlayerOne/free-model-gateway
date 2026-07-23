@@ -64,6 +64,7 @@ struct CachedLocalModel {
 struct ProviderRuntime {
     config: ProviderConfig,
     api_key: Option<String>,
+    api_key_source: Option<&'static str>,
     client: Client,
     permits: Arc<Semaphore>,
     available: bool,
@@ -107,11 +108,14 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
                 provider: name.clone(),
                 message: error.to_string(),
             })?;
-        let api_key = match provider.api_key_secret.as_deref() {
-            Some(name) => secrets.get(name)?,
-            None => None,
+        let (api_key, api_key_source) = match provider.api_key_secret.as_deref() {
+            Some(name) => (secrets.get(name)?, secrets.source(name)?),
+            None => (None, None),
         };
-        let available = provider.api_key_secret.is_none() || api_key.is_some();
+        let available = provider.api_key_secret.is_none()
+            || api_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
         let provider_limit = provider.max_in_flight.unwrap_or_else(|| {
             if provider.billing_mode == crate::config::BillingMode::Free
                 && quota_reference(provider, "").is_none()
@@ -126,6 +130,7 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
             ProviderRuntime {
                 config: provider.clone(),
                 api_key,
+                api_key_source,
                 client,
                 permits: Arc::new(Semaphore::new(provider_limit)),
                 available,
@@ -154,6 +159,7 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         ProviderRuntime {
             config: local_config,
             api_key: None,
+            api_key_source: None,
             client: local_client,
             permits: Arc::new(Semaphore::new(config.server.max_in_flight)),
             available: true,
@@ -185,10 +191,168 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
         .route("/v1/models", get(list_models))
+        .route("/v1/providers", get(list_providers))
         .route("/v1/rankings", get(list_rankings))
+        .route("/v1/free-models", get(list_free_models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(DefaultBodyLimit::max(state.config.server.max_body_bytes))
         .with_state(state))
+}
+
+#[derive(Debug, Deserialize)]
+struct ProvidersQuery {
+    available: Option<bool>,
+}
+
+fn find_benchmark<'a>(
+    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
+    model: &str,
+    task: TaskKind,
+) -> Option<&'a BenchmarkModel> {
+    let mut best: Option<(&BenchmarkModel, f64)> = None;
+    for (benchmark_id, models) in benchmarks {
+        if !benchmark_ids_match(model, benchmark_id) {
+            continue;
+        }
+        for benchmark in models {
+            let Some(score) = quality_for(benchmark, task) else {
+                continue;
+            };
+            if best.is_none_or(|(_, best_score)| score > best_score) {
+                best = Some((benchmark, score));
+            }
+        }
+    }
+    best.map(|(benchmark, _)| benchmark)
+}
+
+fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
+    let catalog_variants = normalized_identifier_variants(catalog_id);
+    let benchmark_variants = normalized_identifier_variants(benchmark_id);
+    for catalog in &catalog_variants {
+        for benchmark in &benchmark_variants {
+            if catalog == benchmark {
+                return true;
+            }
+            let catalog_tokens = catalog.split('-').collect::<BTreeSet<_>>();
+            let benchmark_tokens = benchmark.split('-').collect::<BTreeSet<_>>();
+            if benchmark_tokens.len() >= 2
+                && (catalog.starts_with(&format!("{benchmark}-"))
+                    || benchmark.starts_with(&format!("{catalog}-")))
+            {
+                return true;
+            }
+            if catalog_tokens.len() >= 2
+                && catalog_tokens.len() == benchmark_tokens.len()
+                && catalog_tokens == benchmark_tokens
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn normalized_identifier_variants(identifier: &str) -> Vec<String> {
+    let segments = identifier
+        .split('/')
+        .map(normalize_identifier)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    (0..segments.len())
+        .map(|index| segments[index..].join("-"))
+        .collect()
+}
+
+fn normalize_identifier(identifier: &str) -> String {
+    let mut normalized = String::new();
+    for character in identifier.chars() {
+        if character.is_ascii_alphanumeric() {
+            normalized.push(character.to_ascii_lowercase());
+        } else if !normalized.ends_with('-') {
+            normalized.push('-');
+        }
+    }
+    normalized.trim_matches('-').to_owned()
+}
+
+async fn list_providers(
+    State(state): State<AppState>,
+    Query(query): Query<ProvidersQuery>,
+) -> Response {
+    let mut model_counts = BTreeMap::new();
+    match state
+        .routing
+        .all_candidates(state.config.server.catalog_max_age_seconds)
+    {
+        Ok(offerings) => {
+            for offering in offerings {
+                let counts = model_counts
+                    .entry(offering.provider)
+                    .or_insert((0usize, 0usize));
+                counts.0 += 1;
+                if offering.is_free {
+                    counts.1 += 1;
+                }
+            }
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": error.to_string(),
+                        "type": "server_error",
+                        "code": "provider_catalog_unavailable"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+    let providers = state
+        .providers
+        .iter()
+        .filter(|(_, runtime)| {
+            runtime.config.api_key_secret.is_some()
+                && query
+                    .available
+                    .is_none_or(|available| runtime.available == available)
+        })
+        .map(|(code_name, runtime)| {
+            let config = &runtime.config;
+            let (model_count, free_model_count) =
+                model_counts.get(code_name).copied().unwrap_or_default();
+            json!({
+                "id": code_name,
+                "name": config
+                    .profile
+                    .map(|profile| profile.display_name())
+                    .unwrap_or("Custom provider"),
+                "adapter": config.adapter,
+                "base_url": config.base_url,
+                "billing_mode": match config.billing_mode {
+                    BillingMode::Free => "free",
+                    BillingMode::Paid => "paid",
+                    BillingMode::Subscription => "subscription",
+                },
+                "api_key_secret": config.api_key_secret,
+                "api_key_source": runtime.api_key_source,
+                "account_scope": config.account_scope,
+                "model_count": model_count,
+                "free_model_count": free_model_count,
+                "model_allowlist_count": config.model_allowlist.len(),
+                "model_denylist_count": config.model_denylist.len(),
+                "allow_preview_models": config.allow_preview_models,
+                "available": runtime.available,
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({
+        "object": "list",
+        "data": providers,
+    }))
+    .into_response()
 }
 
 pub async fn run_server(
@@ -295,6 +459,13 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
 struct RankingQuery {
     task: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FreeModelsQuery {
+    task: Option<String>,
+    limit: Option<usize>,
+    provider: Option<String>,
 }
 
 async fn list_rankings(
@@ -407,6 +578,215 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
             })
         })
         .collect()
+}
+
+async fn list_free_models(
+    State(state): State<AppState>,
+    Query(query): Query<FreeModelsQuery>,
+) -> Response {
+    let provider_filter = match query.provider.as_deref() {
+        None | Some("all") => None,
+        Some(provider) => Some(provider),
+    };
+    if let Some(provider) = provider_filter {
+        if !state.config.providers.contains_key(provider) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": format!("unknown provider '{provider}'"),
+                        "type": "invalid_request_error",
+                        "code": "invalid_provider"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+    let task = match query.task.as_deref().unwrap_or("general") {
+        "general" => TaskKind::General,
+        "coding" => TaskKind::Coding,
+        "agentic" => TaskKind::Agentic,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "task must be one of general, coding, agentic",
+                        "type": "invalid_request_error",
+                        "code": "invalid_task"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
+    let max_age = state.config.server.catalog_max_age_seconds;
+    let benchmark_max_age = state.config.server.benchmark_max_age_seconds;
+
+    let (offerings, benchmarks) = match tokio::try_join!(
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.free_candidates(max_age)
+        }),
+        routing_operation(state.routing.clone(), move |routing| {
+            routing.benchmark_models(benchmark_max_age)
+        })
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": "routing state is unavailable",
+                        "type": "server_error",
+                        "code": "routing_state_unavailable"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut benchmark_map = BTreeMap::new();
+    for b in &benchmarks {
+        benchmark_map
+            .entry(b.id.clone())
+            .or_insert_with(Vec::new)
+            .push(b.clone());
+    }
+
+    let mut providers = BTreeMap::new();
+    let mut data = Vec::new();
+
+    for offering in &offerings {
+        if provider_filter.is_some_and(|provider| provider != offering.provider) {
+            continue;
+        }
+        let Some(config) = state.config.providers.get(&offering.provider) else {
+            continue;
+        };
+        let Some(runtime) = state.providers.get(&offering.provider) else {
+            continue;
+        };
+        if !runtime.available
+            || (!config.model_allowlist.is_empty()
+                && !config
+                    .model_allowlist
+                    .iter()
+                    .any(|model| model == &offering.model))
+            || config
+                .model_denylist
+                .iter()
+                .any(|model| model == &offering.model)
+        {
+            continue;
+        }
+
+        let canonical = config
+            .model_mappings
+            .get(&offering.model)
+            .map(String::as_str)
+            .unwrap_or(&offering.model);
+        let benchmark = find_benchmark(&benchmark_map, canonical, task);
+        let quality = benchmark.and_then(|benchmark| quality_for(benchmark, task));
+
+        let reference = quota_reference(config, &offering.model);
+        let limits = reference
+            .as_ref()
+            .map(|r| r.rules.clone())
+            .unwrap_or_default();
+        let limit_kind = reference.as_ref().map(|r| r.as_of).unwrap_or("unknown");
+        let source_url = reference.as_ref().map(|r| r.source_url);
+
+        providers.entry(offering.provider.clone()).or_insert_with(|| {
+            json!({
+                "name": config.profile
+                    .map(|profile| profile.definition().display_name.to_owned())
+                    .unwrap_or_else(|| offering.provider.clone()),
+                "billing_mode": match config.billing_mode {
+                    BillingMode::Free => "free",
+                    BillingMode::Paid => "paid",
+                    BillingMode::Subscription => "subscription",
+                },
+                "limits": limits.iter().map(|limit| json!({
+                    "kind": serde_json::to_string(&limit.kind).unwrap_or_else(|_| "unknown".to_owned()).trim_matches('"'),
+                    "limit": limit.limit,
+                    "window_seconds": limit.window_seconds,
+                })).collect::<Vec<_>>(),
+                "limit_status": limit_kind,
+                "limit_reference": source_url,
+            })
+        });
+
+        data.push((
+            quality,
+            benchmark.cloned(),
+            offering.clone(),
+            limit_kind,
+            source_url,
+        ));
+    }
+
+    data.sort_by(
+        |(left_q, _, left_o, left_kind, _), (right_q, _, right_o, right_kind, _)| {
+            let left_benchmarked = left_q.is_some();
+            let right_benchmarked = right_q.is_some();
+            right_benchmarked
+                .cmp(&left_benchmarked)
+                .then_with(|| right_q.unwrap_or(0.0).total_cmp(&left_q.unwrap_or(0.0)))
+                .then_with(|| {
+                    let left_known = *left_kind != "unknown";
+                    let right_known = *right_kind != "unknown";
+                    right_known.cmp(&left_known)
+                })
+                .then_with(|| left_o.provider.cmp(&right_o.provider))
+                .then_with(|| left_o.model.cmp(&right_o.model))
+        },
+    );
+
+    let ranked = data
+        .into_iter()
+        .take(limit)
+        .enumerate()
+        .map(
+            |(index, (quality, benchmark, offering, limit_kind, source_url))| {
+                json!({
+                    "rank": index + 1,
+                "provider": offering.provider,
+                "model": offering.model,
+                "quality": quality,
+                "scores": {
+                    "general": benchmark.as_ref().and_then(|benchmark| benchmark.intelligence),
+                    "coding": benchmark.as_ref().and_then(|benchmark| benchmark.coding_quality),
+                    "agentic": benchmark.as_ref().and_then(|benchmark| benchmark.agentic_quality),
+                },
+                    "capabilities": {
+                        "context_length": offering.context_length,
+                        "supports_tools": offering.supports_tools,
+                        "supports_vision": offering.supports_vision,
+                        "supports_structured_output": offering.supports_structured_output,
+                    },
+                    "input_price_per_million": offering.input_price_per_million,
+                    "output_price_per_million": offering.output_price_per_million,
+                    "limit_status": limit_kind,
+                    "reference_url": source_url,
+                })
+            },
+        )
+        .collect::<Vec<_>>();
+
+    Json(json!({
+        "object": "free-models",
+        "task": task.as_str(),
+        "provider": provider_filter,
+        "catalog_max_age_seconds": max_age,
+        "benchmark_max_age_seconds": benchmark_max_age,
+        "providers": providers,
+        "data": ranked
+    }))
+    .into_response()
 }
 
 async fn chat_completions(
@@ -2898,10 +3278,10 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        RequestRequirements, StreamChoice, decorate_json_response, estimate_request_tokens,
-        expected_cost_microusd, is_fallback_status, log_request, malformed_sse_event,
-        rank_benchmark_models, rate_limit_reset_delay, request_id, session_material,
-        take_sse_event, transform_sse_event,
+        RequestRequirements, StreamChoice, benchmark_ids_match, decorate_json_response,
+        estimate_request_tokens, expected_cost_microusd, find_benchmark, is_fallback_status,
+        log_request, malformed_sse_event, rank_benchmark_models, rate_limit_reset_delay,
+        request_id, session_material, take_sse_event, transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use axum::http::{HeaderMap, StatusCode};
@@ -2936,6 +3316,47 @@ mod tests {
         assert!(is_fallback_status(StatusCode::TOO_MANY_REQUESTS));
         assert!(is_fallback_status(StatusCode::BAD_GATEWAY));
         assert!(!is_fallback_status(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn benchmark_matching_handles_provider_prefixes_and_normalized_versions() {
+        let mut benchmarks = BTreeMap::new();
+        benchmarks.insert(
+            "gemini-2-5-flash".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "gemini-2-5-flash",
+                80.0,
+                70.0,
+                60.0,
+                1.0,
+                1.0,
+            )],
+        );
+        benchmarks.insert(
+            "claude-4-5-sonnet".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "claude-4-5-sonnet",
+                90.0,
+                85.0,
+                75.0,
+                1.0,
+                1.0,
+            )],
+        );
+        assert!(benchmark_ids_match(
+            "models/gemini-2.5-flash",
+            "gemini-2-5-flash"
+        ));
+        assert!(benchmark_ids_match(
+            "anthropic/claude-sonnet-4-5",
+            "claude-4-5-sonnet"
+        ));
+        assert_eq!(
+            find_benchmark(&benchmarks, "models/gemini-2.5-flash", TaskKind::General)
+                .expect("Gemini benchmark")
+                .intelligence,
+            Some(80.0)
+        );
     }
 
     #[test]

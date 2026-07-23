@@ -221,6 +221,7 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
     match command {
         CatalogCommand::Refresh { provider } => {
             let mut refreshed = 0usize;
+            let mut failures = Vec::new();
             for (name, provider_config) in &config.providers {
                 if provider.as_deref().is_some_and(|selected| selected != name) {
                     continue;
@@ -241,7 +242,14 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
                     },
                     None => None,
                 };
-                let models = fetch_catalog(provider_config, api_key.as_deref())?;
+                let models = match fetch_catalog(provider_config, api_key.as_deref()) {
+                    Ok(models) => models,
+                    Err(error) => {
+                        println!("Failed {name}: {error}");
+                        failures.push(name.clone());
+                        continue;
+                    }
+                };
                 let models = models
                     .into_iter()
                     .map(|model| {
@@ -272,6 +280,14 @@ fn catalog(command: CatalogCommand) -> Result<(), Box<dyn Error>> {
             }
             if provider.is_some() && refreshed == 0 {
                 return Err("selected provider was not refreshed".into());
+            }
+            if !failures.is_empty() {
+                return Err(format!(
+                    "{} provider catalog refresh(es) failed: {}",
+                    failures.len(),
+                    failures.join(", ")
+                )
+                .into());
             }
         }
         CatalogCommand::Status => {
@@ -781,7 +797,11 @@ fn config_check(online: bool) -> Result<(), Box<dyn Error>> {
 
 fn config_show() -> Result<(), Box<dyn Error>> {
     let path = Config::default_path();
-    let config = Config::read(&path)?;
+    let config = match Config::read(&path) {
+        Ok(config) => config,
+        Err(ConfigError::Missing(_)) => Config::default(),
+        Err(error) => return Err(error.into()),
+    };
     println!("# Canonical non-secret configuration: {}", path.display());
     print!("{}", config.to_toml()?);
     Ok(())

@@ -45,7 +45,14 @@ else
     # Wait for the port to be ready
     for i in $(seq 1 30); do
         if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-            echo "Server is ready (PID $PID, logs: $LOG)"
+            LISTENER_PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
+            LISTENER_PID=""
+            while IFS= read -r candidate; do
+                LISTENER_PID="$candidate"
+                break
+            done <<< "$LISTENER_PIDS"
+            printf '%s\n' "$LISTENER_PID" > "$PIDFILE"
+            echo "Server is ready (PID $LISTENER_PID, logs: $LOG)"
             exit 0
         fi
         sleep 0.5

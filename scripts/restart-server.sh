@@ -5,13 +5,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${MODEL_GATEWAY_PORT:-8008}"
 PIDFILE="$ROOT/server.pid"
 
-# Kill only running model-gateway server processes
-PIDS=$(pgrep -x "model-gateway" 2>/dev/null || true)
+# Kill the process actually listening on the gateway port. The executable's
+# macOS process name can be its full path, so an exact pgrep is unreliable.
+PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$PIDS" ]; then
     echo "Stopping existing gateway (PIDs: $PIDS)..."
     echo "$PIDS" | xargs kill 2>/dev/null || true
     sleep 1
-    PIDS=$(pgrep -x "model-gateway" 2>/dev/null || true)
+    PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
     if [ -n "$PIDS" ]; then
         echo "$PIDS" | xargs kill -9 2>/dev/null || true
         sleep 1
@@ -27,5 +28,10 @@ for i in $(seq 1 15); do
     echo "Waiting for port $PORT... ($i)"
     sleep 0.5
 done
+
+if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Gateway port $PORT is still occupied; refusing to start another server." >&2
+    exit 1
+fi
 
 exec "$ROOT/scripts/start-server.sh" "$@"

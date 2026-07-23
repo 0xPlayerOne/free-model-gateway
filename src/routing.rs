@@ -12,7 +12,7 @@ use crate::benchmarks::BenchmarkModel;
 use crate::config::{
     BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
 };
-use crate::providers::AccountLimit;
+use crate::providers::{AccountLimit, is_embedding_model};
 
 #[derive(Debug, Error)]
 pub enum RoutingError {
@@ -132,13 +132,13 @@ pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
     ),
     limit(
         ProviderProfileId::OpenCode,
-        "https://opencode.ai/docs/go/",
+        "https://opencode.ai/docs/zen/",
         "subscription_value_windows",
     ),
     limit(
-        ProviderProfileId::Cerebras,
-        "https://inference-docs.cerebras.ai/support/rate-limits",
-        "published_static",
+        ProviderProfileId::OpenCodeGo,
+        "https://opencode.ai/docs/go/",
+        "subscription_value_windows",
     ),
     limit(
         ProviderProfileId::Mistral,
@@ -147,7 +147,7 @@ pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
     ),
     limit(
         ProviderProfileId::NousPortal,
-        "https://portal.nousresearch.com/",
+        "https://inference-api.nousresearch.com/v1",
         "published_partial",
     ),
     limit(
@@ -169,16 +169,6 @@ pub const PROVIDER_LIMIT_REFERENCES: &[ProviderLimitReference] = &[
         ProviderProfileId::OllamaCloud,
         "https://docs.ollama.com/cloud",
         "gpu_time_windows",
-    ),
-    limit(
-        ProviderProfileId::Cline,
-        "https://docs.cline.bot/getting-started/clinepass",
-        "account_specific",
-    ),
-    limit(
-        ProviderProfileId::Gitlawb,
-        "https://gitlawb.com/opengateway",
-        "undocumented",
     ),
     limit(
         ProviderProfileId::SiliconFlow,
@@ -373,6 +363,9 @@ impl RoutingStore {
         let transaction = connection.transaction()?;
         transaction.execute("DELETE FROM catalog_models WHERE provider = ?1", [provider])?;
         for model in models {
+            if is_embedding_model(&model.model) {
+                continue;
+            }
             transaction.execute(
                 "INSERT INTO catalog_models(
                     provider, model, is_free, refreshed_at, context_length,
@@ -1082,20 +1075,45 @@ impl RoutingStore {
 }
 
 pub fn is_verified_free(provider: &ProviderConfig, model: &str, zero_priced: bool) -> bool {
-    if zero_priced || provider.free_models.iter().any(|free| free == model) {
+    let explicitly_free = provider.free_models.iter().any(|free| free == model);
+    let lower = model.to_ascii_lowercase();
+    if provider.profile == Some(ProviderProfileId::OpenCodeGo) {
+        return explicitly_free;
+    }
+    if provider.profile == Some(ProviderProfileId::KiloCode) {
+        return explicitly_free || lower.contains("free");
+    }
+    if zero_priced || explicitly_free {
         return true;
+    }
+    match provider.profile {
+        Some(ProviderProfileId::OpenRouter)
+        | Some(ProviderProfileId::NousPortal)
+        | Some(ProviderProfileId::OrcaRouter) => {
+            if lower.contains("free") {
+                return true;
+            }
+        }
+        Some(ProviderProfileId::OpenCode) => {
+            if lower.contains("free") || lower == "big-pickle" {
+                return true;
+            }
+        }
+        _ => {}
     }
     if provider.billing_mode != BillingMode::Free {
         return false;
     }
-    match provider.profile {
-        Some(ProviderProfileId::OpenRouter) | Some(ProviderProfileId::KiloCode) => {
-            model.ends_with(":free")
-        }
-        Some(ProviderProfileId::GoogleGemini) | Some(ProviderProfileId::Groq) => true,
-        Some(ProviderProfileId::Zai) => model.to_ascii_lowercase().contains("flash"),
-        _ => false,
-    }
+    matches!(
+        provider.profile,
+        Some(ProviderProfileId::GoogleGemini)
+            | Some(ProviderProfileId::Groq)
+            | Some(ProviderProfileId::Mistral)
+            | Some(ProviderProfileId::NvidiaNim)
+            | Some(ProviderProfileId::Novita)
+            | Some(ProviderProfileId::OllamaCloud)
+            | Some(ProviderProfileId::SiliconFlow)
+    )
 }
 
 pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaReference> {
@@ -1113,29 +1131,23 @@ pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaRe
     if provider.billing_mode != BillingMode::Free {
         return None;
     }
-    let (rules, source_url, scope) = match provider.profile {
+    let (rules, source_url, as_of, scope) = match provider.profile {
         Some(ProviderProfileId::OpenRouter) => (
             vec![requests(20, 60), requests(50, 86_400)],
             "https://openrouter.ai/docs/api/reference/limits",
+            "published_static",
             "account",
         ),
         Some(ProviderProfileId::KiloCode) => (
             vec![requests(200, 3_600)],
             "https://kilo.ai/docs/gateway/usage-and-billing",
+            "published_static",
             "ip",
         ),
         Some(ProviderProfileId::Groq) => (
             vec![requests(30, 60), requests(1_000, 86_400), tokens(6_000, 60)],
             "https://console.groq.com/docs/rate-limits",
-            "organization_model",
-        ),
-        Some(ProviderProfileId::Cerebras) => (
-            vec![
-                requests(5, 60),
-                tokens(30_000, 60),
-                tokens(1_000_000, 86_400),
-            ],
-            "https://inference-docs.cerebras.ai/support/rate-limits",
+            "published_static",
             "organization_model",
         ),
         Some(ProviderProfileId::GoogleGemini) => {
@@ -1154,12 +1166,24 @@ pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaRe
                     tokens(250_000, 60),
                 ],
                 "https://ai.google.dev/gemini-api/docs/rate-limits",
+                "published_static",
                 "project_model",
             )
         }
+        Some(ProviderProfileId::OpenCodeGo) => (
+            vec![
+                cost_microusd(12_000_000, 18_000, QuotaBoundary::Rolling),
+                cost_microusd(30_000_000, 604_800, QuotaBoundary::UtcWeek),
+                cost_microusd(60_000_000, 2_592_000, QuotaBoundary::UtcMonth),
+            ],
+            "https://opencode.ai/docs/go/",
+            "published_static",
+            "workspace",
+        ),
         Some(ProviderProfileId::Zai) => (
             vec![requests(1, 1)],
             "https://docs.z.ai/guides/overview/pricing",
+            "best_effort",
             "account_model",
         ),
         _ => return None,
@@ -1167,7 +1191,7 @@ pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaRe
     Some(QuotaReference {
         rules,
         source_url,
-        as_of: "2026-07-22",
+        as_of,
         scope: scope.to_owned(),
     })
 }
@@ -1187,6 +1211,15 @@ fn tokens(limit: u64, window_seconds: u64) -> QuotaLimit {
         limit,
         window_seconds,
         boundary: QuotaBoundary::Rolling,
+    }
+}
+
+fn cost_microusd(limit: u64, window_seconds: u64, boundary: QuotaBoundary) -> QuotaLimit {
+    QuotaLimit {
+        kind: QuotaKind::CostMicrousd,
+        limit,
+        window_seconds,
+        boundary,
     }
 }
 
@@ -1433,7 +1466,9 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
-    use crate::config::{ProviderConfig, QuotaBoundary, QuotaKind, QuotaLimit};
+    use crate::config::{
+        BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
+    };
 
     use crate::benchmarks::BenchmarkModel;
     use crate::providers::AccountLimit;
@@ -1501,6 +1536,47 @@ mod tests {
         assert!(!super::is_verified_free(&provider, "model", false));
         provider.free_models.push("model".to_owned());
         assert!(super::is_verified_free(&provider, "model", false));
+    }
+
+    #[test]
+    fn provider_specific_free_tier_rules_are_explicit() {
+        let mut provider = ProviderConfig {
+            profile: Some(ProviderProfileId::KiloCode),
+            billing_mode: BillingMode::Paid,
+            ..ProviderConfig::default()
+        };
+        assert!(!super::is_verified_free(
+            &provider,
+            "provider/preview",
+            true
+        ));
+        assert!(super::is_verified_free(&provider, "provider/free", false));
+
+        provider.profile = Some(ProviderProfileId::OpenCode);
+        assert!(super::is_verified_free(&provider, "big-pickle", false));
+        assert!(super::is_verified_free(&provider, "mimo-v2.5-free", false));
+
+        provider.profile = Some(ProviderProfileId::OpenCodeGo);
+        assert!(!super::is_verified_free(&provider, "mimo-v2.5", true));
+        assert!(!super::is_verified_free(&provider, "mimo-v2.5-free", false));
+
+        provider.profile = Some(ProviderProfileId::Mistral);
+        provider.billing_mode = BillingMode::Free;
+        assert!(super::is_verified_free(
+            &provider,
+            "mistral-small-latest",
+            false
+        ));
+        provider.billing_mode = BillingMode::Paid;
+        assert!(!super::is_verified_free(
+            &provider,
+            "mistral-small-latest",
+            false
+        ));
+
+        provider.profile = Some(ProviderProfileId::Zai);
+        provider.billing_mode = BillingMode::Free;
+        assert!(!super::is_verified_free(&provider, "glm-flash", false));
     }
 
     fn catalog(model: &str, is_free: bool) -> CatalogRecord {

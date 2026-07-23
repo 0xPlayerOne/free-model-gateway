@@ -20,18 +20,15 @@ not gateway providers.
 | Ollama | custom endpoint | OpenAI Chat / local | Built-in profile; profile and OpenAI wire contract-tested |
 | LM Studio | `lmstudio` | OpenAI Chat / optional local key | Built-in profile; profile and OpenAI wire contract-tested |
 | OpenAI API | `openai-api` | OpenAI Chat / API key | Built-in profile; OpenAI-wire bearer catalog contract-tested |
-| Fireworks, Novita, z.ai | `fireworks`, `novita`, `zai` | OpenAI-compatible / API key | Built-in profiles; OpenAI-wire bearer catalog contract-tested |
-| DeepSeek | `deepseek` | OpenAI-compatible / API key | Built-in profile; OpenAI-wire bearer catalog contract-tested |
-| Gemini, OpenCode, Mistral, NVIDIA NIM, Groq, OrcaRouter | `google-gemini`, `opencode`, `mistral`, `nvidia-nim`, `groq`, `orcarouter` | OpenAI-compatible / API key | Built-in profiles; zero-credit model catalogs checked on demand |
-| Kilo Code, Cerebras, Nous Portal | `kilocode`, `cerebras`, `nous-portal` | OpenAI-compatible / API key | Built-in profiles; configuration-only check because no documented zero-credit endpoint is available |
-| Ollama Cloud | `ollama-cloud` | OpenAI-compatible / API key | Secondary profile; documented model catalog checked on demand |
-| Cline API | `cline` | OpenAI-compatible / API key | Secondary profile; configuration-only because the documented API does not expose a zero-credit model catalog endpoint |
-| Gitlawb OpenGateway | `gitlawb` | OpenAI-compatible / API key | Optional profile; configuration-only because the supplied chat endpoint does not expose a documented zero-credit model catalog |
+| Fireworks, DeepSeek, OpenAI API, z.ai, OpenCode Go, OrcaRouter | `fireworks`, `deepseek`, `openai-api`, `zai`, `opencode-go`, `orcarouter` | OpenAI-compatible / API key | Optional paid profiles; OpenAI-wire bearer catalog checked on demand |
+| Gemini, OpenCode Zen, Mistral, NVIDIA NIM, Groq, Novita, SiliconFlow | `google-gemini`, `opencode-zen`, `mistral`, `nvidia-nim`, `groq`, `novita`, `silicon-flow` | OpenAI-compatible / API key | Built-in profiles; zero-credit model catalogs checked on demand |
+| Kilo Code, Nous Portal | `kilocode`, `nous-portal` | OpenAI-compatible / API key | Built-in profiles; Kilo model catalog checked on demand |
+| Ollama Cloud | `ollama-cloud` | OpenAI-compatible / API key | Core profile; documented model catalog checked on demand |
 | SiliconFlow | `silicon-flow` | OpenAI-compatible / API key | Optional profile; model catalog checked on demand, not recommended by default |
 | Kimi, MiniMax, Alibaba | `kimi-coding`, `minimax`, `alibaba` and regional variants | OpenAI-compatible or native variant / API key | Planned profiles/adapters |
 | Arcee, GMI, StepFun, Upstage | `arcee`, `gmi`, `stepfun`, `upstage` | OpenAI-compatible / API key | Planned profiles |
 | Hugging Face, Ollama Cloud | `huggingface`, `ollama-cloud` | OpenAI-compatible or native / API key | Planned profiles/adapters |
-| Anthropic | `anthropic` | Anthropic Messages / API or OAuth | Planned native adapter |
+| Anthropic | `anthropic` | Anthropic Messages / API or OAuth | Optional paid credential documented; native adapter planned |
 | Google Gemini native API | `gemini-native` | Gemini API / API key | Planned native adapter; the OpenAI compatibility endpoint is supported |
 | Vertex AI | `vertex` | Vertex OpenAI-compatible / OAuth | Planned credential adapter |
 | Azure Foundry | `azure-foundry` | OpenAI-compatible / API key or Entra | Planned credential adapter |

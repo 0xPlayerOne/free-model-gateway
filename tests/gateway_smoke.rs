@@ -13,8 +13,8 @@ use axum::{Router, serve};
 use futures_util::{StreamExt, stream};
 use model_gateway::benchmarks::BenchmarkModel;
 use model_gateway::config::{
-    BillingMode, Config, ModelConfig, ProviderConfig, QuotaBoundary, QuotaKind, QuotaLimit,
-    ServerConfig, TargetConfig,
+    BillingMode, Config, ModelConfig, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind,
+    QuotaLimit, ServerConfig, TargetConfig,
 };
 use model_gateway::gateway::build_app;
 use model_gateway::routing::{CatalogRecord, RoutingStore};
@@ -212,6 +212,162 @@ async fn spawn_gateway(config: Config) -> String {
         serve(listener, app).await.expect("gateway server");
     });
     format!("http://{address}")
+}
+
+#[tokio::test]
+async fn free_models_can_be_filtered_by_provider() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let mut alpha = provider("https://alpha.example/v1".to_owned());
+    alpha.profile = Some(ProviderProfileId::OpenRouter);
+    let mut beta = provider("https://beta.example/v1".to_owned());
+    beta.profile = Some(ProviderProfileId::Groq);
+    let mut config = config_for(
+        BTreeMap::from([("alpha".to_owned(), alpha), ("beta".to_owned(), beta)]),
+        vec![TargetConfig {
+            provider: "alpha".to_owned(),
+            model: "alpha-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path.clone());
+
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "alpha",
+            &[CatalogRecord {
+                model: "alpha-free".to_owned(),
+                is_free: true,
+                context_length: None,
+                supports_tools: None,
+                supports_vision: None,
+                supports_structured_output: None,
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("alpha catalog");
+    store
+        .replace_catalog(
+            "beta",
+            &[CatalogRecord {
+                model: "beta-free".to_owned(),
+                is_free: true,
+                context_length: None,
+                supports_tools: None,
+                supports_vision: None,
+                supports_structured_output: None,
+                input_price_per_million: Some(0.0),
+                output_price_per_million: Some(0.0),
+            }],
+        )
+        .expect("beta catalog");
+
+    let gateway = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{gateway}/v1/free-models?provider=alpha&limit=10"))
+        .send()
+        .await
+        .expect("provider-filtered response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("provider-filtered body");
+    assert_eq!(body["provider"], "alpha");
+    assert_eq!(body["data"].as_array().expect("data").len(), 1);
+    assert_eq!(body["data"][0]["provider"], "alpha");
+    assert!(body["providers"].get("beta").is_none());
+
+    let all_response = client
+        .get(format!("{gateway}/v1/free-models?provider=all&limit=10"))
+        .send()
+        .await
+        .expect("all-provider response");
+    assert_eq!(all_response.status(), StatusCode::OK);
+    let all_body: Value = all_response.json().await.expect("all-provider body");
+    assert!(all_body["provider"].is_null());
+    assert_eq!(all_body["data"].as_array().expect("all data").len(), 2);
+
+    let unfiltered_response = client
+        .get(format!("{gateway}/v1/free-models?limit=10"))
+        .send()
+        .await
+        .expect("unfiltered response");
+    let unfiltered_body: Value = unfiltered_response.json().await.expect("unfiltered body");
+    assert_eq!(all_body["data"], unfiltered_body["data"]);
+
+    let response = client
+        .get(format!("{gateway}/v1/free-models?provider=missing"))
+        .send()
+        .await
+        .expect("unknown provider response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("unknown provider body");
+    assert_eq!(body["error"]["code"], "invalid_provider");
+}
+
+#[tokio::test]
+async fn providers_lists_available_secret_backed_providers_without_credentials() {
+    unsafe {
+        std::env::set_var("MODEL_GATEWAY_TEST_PROVIDER_KEY", "fixture-secret");
+    }
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let mut available = provider("https://available.example/v1".to_owned());
+    available.profile = Some(ProviderProfileId::OpenRouter);
+    available.api_key_secret = Some("MODEL_GATEWAY_TEST_PROVIDER_KEY".to_owned());
+    let mut unavailable = provider("https://unavailable.example/v1".to_owned());
+    unavailable.profile = Some(ProviderProfileId::Groq);
+    unavailable.api_key_secret = Some("MODEL_GATEWAY_MISSING_KEY".to_owned());
+    let mut config = config_for(
+        BTreeMap::from([
+            ("available".to_owned(), available),
+            ("unavailable".to_owned(), unavailable),
+        ]),
+        vec![TargetConfig {
+            provider: "available".to_owned(),
+            model: "available-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+
+    let gateway = spawn_gateway(config).await;
+    let response: Value = reqwest::get(format!("{gateway}/v1/providers"))
+        .await
+        .expect("providers response")
+        .json()
+        .await
+        .expect("providers body");
+    let providers = response["data"].as_array().expect("provider data");
+    assert_eq!(providers.len(), 2);
+    assert_eq!(providers[0]["id"], "available");
+    assert_eq!(providers[0]["name"], "OpenRouter");
+    assert!(providers[0].get("provider").is_none());
+    assert!(providers[0].get("profile").is_none());
+    assert_eq!(
+        providers[0]["api_key_secret"],
+        "MODEL_GATEWAY_TEST_PROVIDER_KEY"
+    );
+    assert_eq!(providers[0]["api_key_source"], "environment");
+    assert_eq!(providers[0]["model_count"], 0);
+    assert_eq!(providers[0]["free_model_count"], 0);
+    assert!(providers[0].get("api_key").is_none());
+    assert_eq!(providers[1]["id"], "unavailable");
+    assert_eq!(providers[1]["available"], false);
+
+    let response: Value = reqwest::get(format!("{gateway}/v1/providers?available=false"))
+        .await
+        .expect("unavailable providers response")
+        .json()
+        .await
+        .expect("unavailable providers body");
+    let unavailable = response["data"].as_array().expect("unavailable data");
+    assert_eq!(unavailable.len(), 1);
+    assert_eq!(unavailable[0]["id"], "unavailable");
+    assert_eq!(unavailable[0]["available"], false);
+
+    unsafe {
+        std::env::remove_var("MODEL_GATEWAY_TEST_PROVIDER_KEY");
+    }
 }
 
 #[tokio::test]
@@ -1337,6 +1493,7 @@ async fn auto_frontier_requires_explicit_billing_and_preview_authorization() {
 
     let frontier = config.providers.get_mut("frontier").expect("provider");
     frontier.billing_mode = BillingMode::Paid;
+    frontier.allow_preview_models = false;
     let preview_blocked = spawn_gateway(config.clone()).await;
     let response = reqwest::Client::new()
         .post(format!("{preview_blocked}/v1/chat/completions"))
