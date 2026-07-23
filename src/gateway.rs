@@ -2852,23 +2852,39 @@ async fn fetch_aa_benchmarks(routing: &RoutingStore, api_key: &str) -> Result<us
         .build()
         .map_err(|e| e.to_string())?;
 
-    let body: serde_json::Value = client
-        .get("https://artificialanalysis.ai/api/v2/data/llms/models")
-        .header("x-api-key", api_key)
-        .send()
-        .await
-        .map_err(|e| format!("AA request failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("AA request failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("AA response parse failed: {e}"))?;
+    let mut all_models = Vec::new();
+    let mut page = 1u64;
+    loop {
+        let body: serde_json::Value = client
+            .get(format!(
+                "https://artificialanalysis.ai/api/v2/language/models/free?page={page}"
+            ))
+            .header("x-api-key", api_key)
+            .send()
+            .await
+            .map_err(|e| format!("AA request failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("AA request failed: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("AA response parse failed: {e}"))?;
 
-    let models = parse_artificial_analysis(&body)?;
+        let models = parse_artificial_analysis(&body)?;
+        all_models.extend(models);
+        let has_more = body
+            .pointer("/pagination/has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !has_more {
+            break;
+        }
+        page += 1;
+    }
+
     let import = BenchmarkImport {
         source: "artificial-analysis".to_owned(),
         attribution: "Artificial Analysis (https://artificialanalysis.ai/)".to_owned(),
-        models,
+        models: all_models,
     }
     .normalize()?;
 

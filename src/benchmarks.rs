@@ -469,6 +469,7 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
         .map(|item| {
             let evaluations = item.get("evaluations").unwrap_or(&Value::Null);
             let pricing = item.get("pricing").unwrap_or(&Value::Null);
+            let performance = item.get("performance").unwrap_or(&Value::Null);
             let model = BenchmarkModel {
                 id: item
                     .get("slug")
@@ -500,6 +501,7 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                 agentic_quality: scaled_number(
                     evaluations,
                     &[
+                        ("artificial_analysis_agentic_index", 1.0),
                         ("tau2", 100.0),
                         ("terminalbench_v2_1", 100.0),
                         ("terminalbench_hard", 100.0),
@@ -521,7 +523,8 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                 instruction_quality: scaled_number(evaluations, &[("ifbench", 100.0)]),
                 input_price_per_million: number(pricing, "price_1m_input_tokens"),
                 output_price_per_million: number(pricing, "price_1m_output_tokens"),
-                latency_seconds: number(item, "median_time_to_first_token_seconds"),
+                latency_seconds: number(performance, "median_time_to_first_token_seconds")
+                    .or_else(|| number(item, "median_time_to_first_token_seconds")),
                 output_tokens_per_task: None,
                 reasoning_effort: aa_reasoning_effort(item),
                 as_of: Some(epoch_date_string()),

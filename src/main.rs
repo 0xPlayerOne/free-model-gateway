@@ -21,6 +21,7 @@ use model_gateway::routing::{
     CatalogRecord, RoutingStore, is_verified_free, provider_limit_reference,
 };
 use model_gateway::secrets::SecretResolver;
+use serde_json::Value;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -132,7 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
     const SOURCE: &str = "artificial-analysis";
     const ATTRIBUTION: &str = "Artificial Analysis (https://artificialanalysis.ai/)";
-    const ENDPOINT: &str = "https://artificialanalysis.ai/api/v2/data/llms/models";
+    const ENDPOINT: &str = "https://artificialanalysis.ai/api/v2/language/models/free";
 
     let resolver = SecretResolver::default();
     let config = Config::load(Config::default_path(), &resolver)?;
@@ -142,20 +143,35 @@ fn benchmarks(command: BenchmarkCommand) -> Result<(), Box<dyn Error>> {
             let api_key = resolver
                 .get("ARTIFICIAL_ANALYSIS_API_KEY")?
                 .ok_or("ARTIFICIAL_ANALYSIS_API_KEY is unavailable")?;
-            let body = reqwest::blocking::Client::builder()
+            let client = reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
                 .user_agent(concat!("model-gateway/", env!("CARGO_PKG_VERSION")))
-                .build()?
-                .get(ENDPOINT)
-                .header("x-api-key", api_key)
-                .send()?
-                .error_for_status()?
-                .json::<serde_json::Value>()?;
+                .build()?;
+            let mut all_models = Vec::new();
+            let mut page = 1u64;
+            loop {
+                let body: serde_json::Value = client
+                    .get(format!("{ENDPOINT}?page={page}"))
+                    .header("x-api-key", &api_key)
+                    .send()?
+                    .error_for_status()?
+                    .json()?;
+                let models = parse_artificial_analysis(&body)?;
+                all_models.extend(models);
+                let has_more = body
+                    .pointer("/pagination/has_more")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if !has_more {
+                    break;
+                }
+                page += 1;
+            }
             let import = BenchmarkImport {
                 source: SOURCE.to_owned(),
                 attribution: ATTRIBUTION.to_owned(),
-                models: parse_artificial_analysis(&body)?,
+                models: all_models,
             }
             .normalize()?;
             let snapshot =
