@@ -692,6 +692,22 @@ async fn list_free_models(
         let benchmark = find_benchmark(&benchmark_map, canonical, task);
         let quality = benchmark.and_then(|benchmark| quality_for(benchmark, task));
 
+        let effective_input = offering
+            .input_price_per_million
+            .or_else(|| benchmark.and_then(|b| b.input_price_per_million));
+        let effective_output = offering
+            .output_price_per_million
+            .or_else(|| benchmark.and_then(|b| b.output_price_per_million));
+        if !state.config.server.free_models_quality.passes(
+            task,
+            benchmark,
+            offering.refreshed_at,
+            effective_input,
+            effective_output,
+        ) {
+            continue;
+        }
+
         let reference = quota_reference(config, &offering.model);
         let limits = reference
             .as_ref()

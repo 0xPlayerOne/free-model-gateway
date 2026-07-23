@@ -560,7 +560,7 @@ fn is_video_gen_model(model: &str) -> bool {
         .filter(|token| !token.is_empty())
         .collect();
     tokens.iter().any(|token| {
-        matches!(*token, "veo" | "cosmos")
+        matches!(*token, "veo" | "cosmos" | "kling")
             || (normalized.contains("wan") && (*token == "v" || token.ends_with('v')))
     })
 }
@@ -803,6 +803,10 @@ mod tests {
         // Cosmos — world model / video understanding
         assert!(is_video_gen_model("nvidia/cosmos-reason2-8b"));
         assert!(is_specialty_model("nvidia/cosmos-reason2-8b"));
+        // Kling — video generation (paid models too)
+        assert!(is_video_gen_model("kling/kling-video-o1"));
+        assert!(is_video_gen_model("kling/kling-3-turbo"));
+        assert!(is_specialty_model("kling/kling-video-o1"));
         // Lyria — music generation (audio)
         assert!(is_audio_model("google/lyria-3-pro-preview"));
         assert!(is_audio_model("models/lyria-realtime-exp"));

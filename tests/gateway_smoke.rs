@@ -306,6 +306,91 @@ async fn free_models_can_be_filtered_by_provider() {
 }
 
 #[tokio::test]
+async fn free_models_quality_bar_filters_low_quality_models() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let state_path = directory.path().join("routing.sqlite3");
+    let store = RoutingStore::open(Some(&state_path)).expect("routing store");
+    store
+        .replace_catalog(
+            "provider-a",
+            &[
+                CatalogRecord {
+                    model: "great-model".to_owned(),
+                    is_free: true,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: Some(1.0),
+                    output_price_per_million: Some(2.0),
+                },
+                CatalogRecord {
+                    model: "weak-model".to_owned(),
+                    is_free: true,
+                    context_length: None,
+                    supports_tools: None,
+                    supports_vision: None,
+                    supports_structured_output: None,
+                    input_price_per_million: Some(1.0),
+                    output_price_per_million: Some(2.0),
+                },
+            ],
+        )
+        .expect("catalog");
+    let great = BenchmarkModel::fixture("great-model", 90.0, 90.0, 90.0, 1.0, 2.0);
+    let weak = BenchmarkModel::fixture("weak-model", 10.0, 10.0, 10.0, 1.0, 2.0);
+    store
+        .replace_benchmarks("fixture", "Fixture", &[great, weak])
+        .expect("benchmarks");
+    drop(store);
+
+    let mut p = provider("https://example.com/v1".to_owned());
+    p.profile = Some(ProviderProfileId::OpenRouter);
+    let mut config = config_for(
+        BTreeMap::from([("provider-a".to_owned(), p)]),
+        vec![TargetConfig {
+            provider: "provider-a".to_owned(),
+            model: "great-model".to_owned(),
+        }],
+    );
+    config.server.state_path = Some(state_path);
+    // Raise the quality bar: only models >= 50.0 should pass
+    config.server.free_models_quality.min_general_index = 50.0;
+    config.server.free_models_quality.max_age_months = 0; // disable age filter
+    config
+        .server
+        .free_models_quality
+        .max_input_price_per_million = 0.0; // disable price filters
+    config
+        .server
+        .free_models_quality
+        .max_output_price_per_million = 0.0;
+
+    let gateway = spawn_gateway(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{gateway}/v1/free-models?limit=10"))
+        .send()
+        .await
+        .expect("free models response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("free models body");
+    let models: Vec<&str> = body["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .filter_map(|entry| entry["model"].as_str())
+        .collect();
+    assert!(
+        models.contains(&"great-model"),
+        "high-quality model should be present: {models:?}"
+    );
+    assert!(
+        !models.contains(&"weak-model"),
+        "low-quality model should be excluded: {models:?}"
+    );
+}
+
+#[tokio::test]
 async fn providers_lists_available_secret_backed_providers_without_credentials() {
     unsafe {
         std::env::set_var("MODEL_GATEWAY_TEST_PROVIDER_KEY", "fixture-secret");

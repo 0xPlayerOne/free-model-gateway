@@ -18,6 +18,14 @@ auto_frontier_enabled = true
 auto_free_enabled = true
 auto_efficient_enabled = true
 
+[server.free_models_quality]
+min_general_index = 25.0
+min_coding_index = 35.0
+min_agentic_index = 15.0
+max_age_months = 18
+max_input_price_per_million = 5.0
+max_output_price_per_million = 15.0
+
 [providers.openrouter]
 profile = "open_router"
 adapter = "openai_chat"
