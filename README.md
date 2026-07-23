@@ -145,6 +145,17 @@ flattened into incomparable scores.
 Successful `auto-efficient` responses include fixed classifier, complexity,
 quality-floor, quality, and expected-cost headers without prompt content.
 
+View the currently active, fresh benchmark rankings with:
+
+```text
+GET /v1/rankings?task=general&limit=100
+```
+
+Supported tasks are `general`, `coding`, `agentic`, and `reasoning`. The response
+contains deterministic ranks, normalized scores, prices, latency, provenance,
+confidence, and the active snapshot attribution. It never performs a live
+benchmark fetch; refresh or import snapshots explicitly first.
+
 ## Supported Profiles
 
 The setup wizard uses one declarative registry. Provider recommendations follow

@@ -5,22 +5,22 @@ use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::BytesRejection;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 
 use crate::benchmarks::{
-    Complexity, ScoredCandidate, classify, is_frontier_model, is_preview_model, pareto_rank,
-    quality_for,
+    BenchmarkModel, Complexity, ScoredCandidate, TaskKind, classify, is_frontier_model,
+    is_preview_model, pareto_rank, quality_for,
 };
 use crate::config::{BillingMode, Config, ProviderConfig, QuotaKind, TargetConfig};
 use crate::providers::prepare_request;
@@ -184,6 +184,7 @@ pub fn build_app(config: Config, secrets: &SecretResolver) -> Result<Router, Gat
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
         .route("/v1/models", get(list_models))
+        .route("/v1/rankings", get(list_rankings))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(DefaultBodyLimit::max(state.config.server.max_body_bytes))
         .with_state(state))
@@ -278,6 +279,128 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         .map(|id| json!({"id": id, "object": "model", "owned_by": "model-gateway"}))
         .collect::<Vec<_>>();
     Json(json!({"object": "list", "data": data}))
+}
+
+#[derive(Debug, Deserialize)]
+struct RankingQuery {
+    task: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_rankings(
+    State(state): State<AppState>,
+    Query(query): Query<RankingQuery>,
+) -> Response {
+    let task = match query.task.as_deref().unwrap_or("general") {
+        "general" => TaskKind::General,
+        "coding" => TaskKind::Coding,
+        "agentic" => TaskKind::Agentic,
+        "reasoning" => TaskKind::Reasoning,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "task must be one of general, coding, agentic, reasoning",
+                        "type": "invalid_request_error",
+                        "code": "invalid_task"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
+    let models = match state
+        .routing
+        .benchmark_models(state.config.server.benchmark_max_age_seconds)
+    {
+        Ok(models) => models,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": "benchmark rankings are unavailable",
+                        "type": "server_error",
+                        "code": "benchmark_state_unavailable"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let snapshots = state
+        .routing
+        .benchmark_status()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(source, fetched_at, models, attribution)| {
+            json!({
+                "source": source,
+                "fetched_at": fetched_at,
+                "models": models,
+                "attribution": attribution
+            })
+        })
+        .collect::<Vec<_>>();
+    let data = rank_benchmark_models(models, task, limit);
+    Json(json!({
+        "object": "benchmark.rankings",
+        "task": task.as_str(),
+        "max_age_seconds": state.config.server.benchmark_max_age_seconds,
+        "snapshots": snapshots,
+        "data": data
+    }))
+    .into_response()
+}
+
+fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usize) -> Vec<Value> {
+    let mut models = models
+        .into_iter()
+        .filter_map(|model| {
+            let quality = quality_for(&model, task)? * model.confidence.unwrap_or(1.0);
+            Some((quality, model))
+        })
+        .collect::<Vec<_>>();
+    models.sort_by(|(left_quality, left), (right_quality, right)| {
+        right_quality
+            .total_cmp(left_quality)
+            .then_with(|| {
+                let left_cost = left.input_price_per_million.unwrap_or(f64::MAX)
+                    + left.output_price_per_million.unwrap_or(f64::MAX);
+                let right_cost = right.input_price_per_million.unwrap_or(f64::MAX)
+                    + right.output_price_per_million.unwrap_or(f64::MAX);
+                left_cost.total_cmp(&right_cost)
+            })
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    models
+        .into_iter()
+        .take(limit)
+        .enumerate()
+        .map(|(index, (quality, model))| {
+            json!({
+                "rank": index + 1,
+                "id": model.id,
+                "creator": model.creator,
+                "quality": quality,
+                "scores": {
+                    "general": model.general_quality,
+                    "coding": model.coding_quality,
+                    "agentic": model.agentic_quality,
+                    "reasoning": model.reasoning_quality
+                },
+                "input_price_per_million": model.input_price_per_million,
+                "output_price_per_million": model.output_price_per_million,
+                "latency_seconds": model.latency_seconds,
+                "reasoning_effort": model.reasoning_effort,
+                "as_of": model.as_of,
+                "harness": model.harness,
+                "confidence": model.confidence
+            })
+        })
+        .collect()
 }
 
 async fn chat_completions(
@@ -2680,8 +2803,10 @@ mod tests {
     use super::{
         RequestRequirements, StreamChoice, decorate_json_response, estimate_request_tokens,
         expected_cost_microusd, is_fallback_status, log_request, malformed_sse_event,
-        rate_limit_reset_delay, request_id, session_material, take_sse_event, transform_sse_event,
+        rank_benchmark_models, rate_limit_reset_delay, request_id, session_material,
+        take_sse_event, transform_sse_event,
     };
+    use crate::benchmarks::{BenchmarkModel, TaskKind};
     use axum::http::{HeaderMap, StatusCode};
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -2730,6 +2855,16 @@ mod tests {
         assert_eq!(rate_limit_reset_delay(&headers), Some(60));
         headers.insert("x-ratelimit-reset", "not-a-number".parse().expect("header"));
         assert_eq!(rate_limit_reset_delay(&headers), None);
+    }
+
+    #[test]
+    fn rankings_are_quality_sorted_with_deterministic_ties() {
+        let mut strong = BenchmarkModel::fixture("strong", 90.0, 90.0, 90.0, 90.0, 3.0, 3.0);
+        strong.confidence = Some(1.0);
+        let cheap = BenchmarkModel::fixture("cheap", 90.0, 90.0, 90.0, 90.0, 1.0, 1.0);
+        let rankings = rank_benchmark_models(vec![strong, cheap], TaskKind::General, 10);
+        assert_eq!(rankings[0]["id"], "cheap");
+        assert_eq!(rankings[0]["rank"], 1);
     }
 
     #[test]
