@@ -20,13 +20,15 @@ pub struct BenchmarkModel {
     #[serde(default)]
     pub creator: Option<String>,
     #[serde(default)]
-    pub general_quality: Option<f64>,
+    pub intelligence: Option<f64>,
     #[serde(default)]
     pub coding_quality: Option<f64>,
     #[serde(default)]
     pub agentic_quality: Option<f64>,
     #[serde(default)]
     pub reasoning_quality: Option<f64>,
+    #[serde(default)]
+    pub instruction_quality: Option<f64>,
     #[serde(default)]
     pub input_price_per_million: Option<f64>,
     #[serde(default)]
@@ -42,8 +44,6 @@ pub struct BenchmarkModel {
     #[serde(default)]
     pub harness: Option<String>,
     #[serde(default)]
-    pub confidence: Option<f64>,
-    #[serde(default)]
     pub release_date: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub raw_metrics: BTreeMap<String, RawBenchmarkMetric>,
@@ -52,7 +52,7 @@ pub struct BenchmarkModel {
 impl BenchmarkModel {
     pub fn fixture(
         id: &str,
-        general: f64,
+        intelligence: f64,
         coding: f64,
         agentic: f64,
         reasoning: f64,
@@ -62,10 +62,11 @@ impl BenchmarkModel {
         Self {
             id: id.to_owned(),
             creator: None,
-            general_quality: Some(general),
+            intelligence: Some(intelligence),
             coding_quality: Some(coding),
             agentic_quality: Some(agentic),
             reasoning_quality: Some(reasoning),
+            instruction_quality: None,
             input_price_per_million: Some(input_price),
             output_price_per_million: Some(output_price),
             latency_seconds: Some(1.0),
@@ -73,7 +74,6 @@ impl BenchmarkModel {
             reasoning_effort: None,
             as_of: None,
             harness: Some("fixture".to_owned()),
-            confidence: Some(1.0),
             release_date: None,
             raw_metrics: BTreeMap::new(),
         }
@@ -84,10 +84,11 @@ impl BenchmarkModel {
             return Err("benchmark model ID must be 1-512 characters".to_owned());
         }
         for score in [
-            self.general_quality,
+            self.intelligence,
             self.coding_quality,
             self.agentic_quality,
             self.reasoning_quality,
+            self.instruction_quality,
         ]
         .into_iter()
         .flatten()
@@ -126,13 +127,11 @@ impl BenchmarkModel {
             return Err(format!("benchmark provenance for '{}' is invalid", self.id));
         }
         if self
-            .confidence
-            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+            .harness
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
         {
-            return Err(format!(
-                "benchmark confidence for '{}' must be between 0 and 1",
-                self.id
-            ));
+            return Err(format!("benchmark provenance for '{}' is invalid", self.id));
         }
         for (metric, raw) in &self.raw_metrics {
             if metric.trim().is_empty()
@@ -177,7 +176,7 @@ impl BenchmarkImport {
                 };
                 match metric.to_ascii_lowercase().as_str() {
                     "general" | "general_quality" | "intelligence" => {
-                        model.general_quality.get_or_insert(normalized);
+                        model.intelligence.get_or_insert(normalized);
                     }
                     "coding" | "coding_quality" => {
                         model.coding_quality.get_or_insert(normalized);
@@ -236,6 +235,7 @@ pub enum TaskKind {
     Coding,
     Agentic,
     Reasoning,
+    Instruction,
 }
 
 impl TaskKind {
@@ -245,6 +245,7 @@ impl TaskKind {
             Self::Coding => "coding",
             Self::Agentic => "agentic",
             Self::Reasoning => "reasoning",
+            Self::Instruction => "instruction",
         }
     }
 }
@@ -413,10 +414,11 @@ pub fn classify(request: &Value) -> Classification {
 
 pub fn quality_for(model: &BenchmarkModel, task: TaskKind) -> Option<f64> {
     match task {
-        TaskKind::General => model.general_quality,
-        TaskKind::Coding => model.coding_quality.or(model.general_quality),
+        TaskKind::General => model.intelligence,
+        TaskKind::Coding => model.coding_quality.or(model.intelligence),
         TaskKind::Agentic => model.agentic_quality.or(model.coding_quality),
-        TaskKind::Reasoning => model.reasoning_quality.or(model.general_quality),
+        TaskKind::Reasoning => model.reasoning_quality.or(model.intelligence),
+        TaskKind::Instruction => model.instruction_quality.or(model.intelligence),
     }
 }
 
@@ -479,7 +481,7 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                     .and_then(|creator| creator.get("name"))
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
-                general_quality: scaled_number(
+                intelligence: scaled_number(
                     evaluations,
                     &[
                         ("artificial_analysis_intelligence_index", 1.0),
@@ -516,6 +518,7 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                         ("gpqa", 100.0),
                     ],
                 ),
+                instruction_quality: scaled_number(evaluations, &[("ifbench", 100.0)]),
                 input_price_per_million: number(pricing, "price_1m_input_tokens"),
                 output_price_per_million: number(pricing, "price_1m_output_tokens"),
                 latency_seconds: number(item, "median_time_to_first_token_seconds"),
@@ -523,7 +526,6 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                 reasoning_effort: aa_reasoning_effort(item),
                 as_of: Some(epoch_date_string()),
                 harness: None,
-                confidence: None,
                 release_date: item
                     .get("release_date")
                     .and_then(Value::as_str)
@@ -659,7 +661,7 @@ mod tests {
         assert_eq!(models[0].coding_quality, Some(75.0));
         assert_eq!(models[0].agentic_quality, Some(45.0));
         assert_eq!(models[0].reasoning_quality, Some(62.3));
-        assert_eq!(models[0].general_quality, Some(78.0));
+        assert_eq!(models[0].intelligence, Some(78.0));
     }
 
     #[test]
@@ -705,7 +707,7 @@ mod tests {
     #[test]
     fn normalizes_raw_metrics_only_with_explicit_comparable_ranges() {
         let mut model = BenchmarkModel::fixture("raw", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        model.general_quality = None;
+        model.intelligence = None;
         model.raw_metrics.insert(
             "general".to_owned(),
             super::RawBenchmarkMetric {
@@ -720,7 +722,7 @@ mod tests {
             models: vec![model],
         };
         let normalized = import.normalize().expect("normalize");
-        assert_eq!(normalized.models[0].general_quality, Some(50.0));
+        assert_eq!(normalized.models[0].intelligence, Some(50.0));
 
         let mut incomparable = BenchmarkModel::fixture("bad", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         incomparable.raw_metrics.insert(

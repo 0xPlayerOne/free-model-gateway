@@ -527,13 +527,13 @@ impl RoutingStore {
                     snapshot_id, model_id, creator, general_quality, coding_quality,
                     agentic_quality, reasoning_quality, input_price, output_price,
                     latency_seconds, output_tokens_per_task, reasoning_effort,
-                    as_of, harness, confidence, release_date
+                    as_of, harness, release_date, instruction_quality
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     snapshot_id,
                     model.id,
                     model.creator,
-                    model.general_quality,
+                    model.intelligence,
                     model.coding_quality,
                     model.agentic_quality,
                     model.reasoning_quality,
@@ -544,15 +544,16 @@ impl RoutingStore {
                     model.reasoning_effort.as_deref().unwrap_or(""),
                     model.as_of,
                     model.harness,
-                    model.confidence,
                     model.release_date,
+                    model.instruction_quality,
                 ],
             )?;
             for (metric, score) in [
-                ("general_quality", model.general_quality),
+                ("general_quality", model.intelligence),
                 ("coding_quality", model.coding_quality),
                 ("agentic_quality", model.agentic_quality),
                 ("reasoning_quality", model.reasoning_quality),
+                ("instruction_quality", model.instruction_quality),
             ] {
                 if let Some(score) = score {
                     let metric = model
@@ -594,8 +595,8 @@ impl RoutingStore {
             "SELECT m.model_id, m.creator, m.general_quality, m.coding_quality,
                     m.agentic_quality, m.reasoning_quality, m.input_price,
                     m.output_price, m.latency_seconds, m.output_tokens_per_task,
-                     NULLIF(m.reasoning_effort, ''), m.as_of, m.harness, m.confidence,
-                     m.release_date
+                     NULLIF(m.reasoning_effort, ''), m.as_of, m.harness,
+                     m.release_date, m.instruction_quality
              FROM benchmark_models m
              JOIN benchmark_snapshots s ON s.id = m.snapshot_id
              WHERE s.active = 1 AND s.fetched_at >= ?1
@@ -609,7 +610,7 @@ impl RoutingStore {
                     Ok(BenchmarkModel {
                         id: row.get(0)?,
                         creator: row.get(1)?,
-                        general_quality: row.get(2)?,
+                        intelligence: row.get(2)?,
                         coding_quality: row.get(3)?,
                         agentic_quality: row.get(4)?,
                         reasoning_quality: row.get(5)?,
@@ -620,8 +621,8 @@ impl RoutingStore {
                         reasoning_effort: row.get(10)?,
                         as_of: row.get(11)?,
                         harness: row.get(12)?,
-                        confidence: row.get(13)?,
-                        release_date: row.get(14)?,
+                        release_date: row.get(13)?,
+                        instruction_quality: row.get(14)?,
                         raw_metrics: BTreeMap::new(),
                     })
                 },
@@ -1407,8 +1408,8 @@ fn ensure_benchmark_columns(connection: &Connection) -> Result<(), rusqlite::Err
     for (name, sql_type) in [
         ("as_of", "TEXT"),
         ("harness", "TEXT"),
-        ("confidence", "REAL"),
         ("release_date", "TEXT"),
+        ("instruction_quality", "REAL"),
     ] {
         if !columns.iter().any(|column| column == name) {
             connection.execute(

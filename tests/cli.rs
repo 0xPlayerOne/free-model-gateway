@@ -112,9 +112,9 @@ model = "fixture"
         r#"{
   "source": "fixture",
   "attribution": "Fixture benchmark data",
-  "models": [{
-    "id": "fixture-model",
-    "general_quality": 75.0,
+   "models": [{
+     "id": "fixture-model",
+     "intelligence": 75.0,
     "input_price_per_million": 1.0,
     "output_price_per_million": 2.0
   }]

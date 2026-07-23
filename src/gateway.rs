@@ -306,12 +306,13 @@ async fn list_rankings(
         "coding" => TaskKind::Coding,
         "agentic" => TaskKind::Agentic,
         "reasoning" => TaskKind::Reasoning,
+        "instruction" => TaskKind::Instruction,
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": {
-                        "message": "task must be one of general, coding, agentic, reasoning",
+                        "message": "task must be one of general, coding, agentic, reasoning, instruction",
                         "type": "invalid_request_error",
                         "code": "invalid_task"
                     }
@@ -369,7 +370,7 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
     let mut models = models
         .into_iter()
         .filter_map(|model| {
-            let quality = quality_for(&model, task)? * model.confidence.unwrap_or(1.0);
+            let quality = quality_for(&model, task)?;
             Some((quality, model))
         })
         .collect::<Vec<_>>();
@@ -389,17 +390,17 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
         .into_iter()
         .take(limit)
         .enumerate()
-        .map(|(index, (quality, model))| {
+        .map(|(index, (_quality, model))| {
             json!({
                 "rank": index + 1,
                 "id": model.id,
                 "creator": model.creator,
-                "quality": quality,
                 "scores": {
-                    "general": model.general_quality,
+                    "intelligence": model.intelligence,
                     "coding": model.coding_quality,
                     "agentic": model.agentic_quality,
-                    "reasoning": model.reasoning_quality
+                    "reasoning": model.reasoning_quality,
+                    "instruction": model.instruction_quality
                 },
                 "input_price_per_million": model.input_price_per_million,
                 "output_price_per_million": model.output_price_per_million,
@@ -407,7 +408,6 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
                 "reasoning_effort": model.reasoning_effort,
                 "as_of": model.as_of,
                 "harness": model.harness,
-                "confidence": model.confidence,
                 "release_date": model.release_date
             })
         })
@@ -1467,7 +1467,7 @@ async fn resolve_benchmark_targets(
             let Some(raw_quality) = quality_for(benchmark, classification.task) else {
                 continue;
             };
-            let quality = raw_quality * benchmark.confidence.unwrap_or(1.0);
+            let quality = raw_quality;
             if quality < quality_floor {
                 continue;
             }
@@ -2945,8 +2945,7 @@ mod tests {
 
     #[test]
     fn rankings_are_quality_sorted_with_deterministic_ties() {
-        let mut strong = BenchmarkModel::fixture("strong", 90.0, 90.0, 90.0, 90.0, 3.0, 3.0);
-        strong.confidence = Some(1.0);
+        let strong = BenchmarkModel::fixture("strong", 90.0, 90.0, 90.0, 90.0, 3.0, 3.0);
         let cheap = BenchmarkModel::fixture("cheap", 90.0, 90.0, 90.0, 90.0, 1.0, 1.0);
         let rankings = rank_benchmark_models(vec![strong, cheap], TaskKind::General, 10);
         assert_eq!(rankings[0]["id"], "cheap");
