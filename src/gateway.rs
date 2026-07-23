@@ -407,7 +407,8 @@ fn rank_benchmark_models(models: Vec<BenchmarkModel>, task: TaskKind, limit: usi
                 "reasoning_effort": model.reasoning_effort,
                 "as_of": model.as_of,
                 "harness": model.harness,
-                "confidence": model.confidence
+                "confidence": model.confidence,
+                "release_date": model.release_date
             })
         })
         .collect()

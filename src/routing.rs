@@ -527,8 +527,8 @@ impl RoutingStore {
                     snapshot_id, model_id, creator, general_quality, coding_quality,
                     agentic_quality, reasoning_quality, input_price, output_price,
                     latency_seconds, output_tokens_per_task, reasoning_effort,
-                    as_of, harness, confidence
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    as_of, harness, confidence, release_date
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     snapshot_id,
                     model.id,
@@ -544,7 +544,8 @@ impl RoutingStore {
                     model.reasoning_effort.as_deref().unwrap_or(""),
                     model.as_of,
                     model.harness,
-                    model.confidence
+                    model.confidence,
+                    model.release_date,
                 ],
             )?;
             for (metric, score) in [
@@ -593,7 +594,8 @@ impl RoutingStore {
             "SELECT m.model_id, m.creator, m.general_quality, m.coding_quality,
                     m.agentic_quality, m.reasoning_quality, m.input_price,
                     m.output_price, m.latency_seconds, m.output_tokens_per_task,
-                     NULLIF(m.reasoning_effort, ''), m.as_of, m.harness, m.confidence
+                     NULLIF(m.reasoning_effort, ''), m.as_of, m.harness, m.confidence,
+                     m.release_date
              FROM benchmark_models m
              JOIN benchmark_snapshots s ON s.id = m.snapshot_id
              WHERE s.active = 1 AND s.fetched_at >= ?1
@@ -619,6 +621,7 @@ impl RoutingStore {
                         as_of: row.get(11)?,
                         harness: row.get(12)?,
                         confidence: row.get(13)?,
+                        release_date: row.get(14)?,
                         raw_metrics: BTreeMap::new(),
                     })
                 },
@@ -1405,6 +1408,7 @@ fn ensure_benchmark_columns(connection: &Connection) -> Result<(), rusqlite::Err
         ("as_of", "TEXT"),
         ("harness", "TEXT"),
         ("confidence", "REAL"),
+        ("release_date", "TEXT"),
     ] {
         if !columns.iter().any(|column| column == name) {
             connection.execute(

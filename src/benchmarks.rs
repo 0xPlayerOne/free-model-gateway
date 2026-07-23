@@ -43,6 +43,8 @@ pub struct BenchmarkModel {
     pub harness: Option<String>,
     #[serde(default)]
     pub confidence: Option<f64>,
+    #[serde(default)]
+    pub release_date: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub raw_metrics: BTreeMap<String, RawBenchmarkMetric>,
 }
@@ -72,6 +74,7 @@ impl BenchmarkModel {
             as_of: None,
             harness: Some("fixture".to_owned()),
             confidence: Some(1.0),
+            release_date: None,
             raw_metrics: BTreeMap::new(),
         }
     }
@@ -517,16 +520,14 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                 output_price_per_million: number(pricing, "price_1m_output_tokens"),
                 latency_seconds: number(item, "median_time_to_first_token_seconds"),
                 output_tokens_per_task: None,
-                reasoning_effort: None,
-                as_of: item
-                    .get("as_of")
+                reasoning_effort: aa_reasoning_effort(item),
+                as_of: Some(epoch_date_string()),
+                harness: None,
+                confidence: None,
+                release_date: item
+                    .get("release_date")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
-                harness: item
-                    .get("harness")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                confidence: item.get("confidence").and_then(Value::as_f64),
                 raw_metrics: BTreeMap::new(),
             };
             model.validate()?;
@@ -548,6 +549,52 @@ fn scaled_number(value: &Value, keys: &[(&str, f64)]) -> Option<f64> {
         if let Some(n) = value.get(*key).and_then(Value::as_f64) {
             return Some((n * multiplier * 100.0).round() / 100.0);
         }
+    }
+    None
+}
+
+fn epoch_date_string() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400) as i64;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+// Howard Hinnant / public-domain civil calendar helpers
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096).div_euclid(365);
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2).div_euclid(153);
+    let day = doy - (153 * mp + 2).div_euclid(5) + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
+fn aa_reasoning_effort(item: &Value) -> Option<String> {
+    let name = item.get("name").and_then(Value::as_str)?;
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("non-reasoning") || lower.contains("(non") {
+        return None;
+    }
+    if lower.contains("(xhigh") || lower.ends_with("-xhigh") {
+        return Some("xhigh".to_owned());
+    }
+    if lower.contains("(high") || lower.ends_with("-high") || lower.contains("(max") {
+        return Some("high".to_owned());
+    }
+    if lower.contains("(medium") || lower.ends_with("-medium") {
+        return Some("medium".to_owned());
+    }
+    if lower.contains("(low") || lower.ends_with("-low") {
+        return Some("low".to_owned());
     }
     None
 }
@@ -613,6 +660,29 @@ mod tests {
         assert_eq!(models[0].agentic_quality, Some(45.0));
         assert_eq!(models[0].reasoning_quality, Some(62.3));
         assert_eq!(models[0].general_quality, Some(78.0));
+    }
+
+    #[test]
+    fn aa_extracts_reasoning_effort_from_model_name() {
+        use serde_json::json;
+
+        let low = json!({"name": "GPT-5.6 Sol (low)"});
+        assert_eq!(super::aa_reasoning_effort(&low), Some("low".to_owned()));
+
+        let high = json!({"name": "GPT-5.6 Sol (high)"});
+        assert_eq!(super::aa_reasoning_effort(&high), Some("high".to_owned()));
+
+        let xhigh = json!({"name": "GPT-5.6 Sol (xhigh)"});
+        assert_eq!(super::aa_reasoning_effort(&xhigh), Some("xhigh".to_owned()));
+
+        let max = json!({"name": "GPT-5.6 Terra (max)"});
+        assert_eq!(super::aa_reasoning_effort(&max), Some("high".to_owned()));
+
+        let non_reason = json!({"name": "GPT-5.6 Terra (Non-reasoning)"});
+        assert_eq!(super::aa_reasoning_effort(&non_reason), None);
+
+        let no_effort = json!({"name": "GPT-5.6 Terra"});
+        assert_eq!(super::aa_reasoning_effort(&no_effort), None);
     }
 
     #[test]
