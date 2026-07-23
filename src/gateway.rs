@@ -209,21 +209,154 @@ fn find_benchmark<'a>(
     model: &str,
     task: TaskKind,
 ) -> Option<&'a BenchmarkModel> {
-    let mut best: Option<(&BenchmarkModel, f64)> = None;
+    // Try original model first
+    if let Some(result) = find_benchmark_raw(benchmarks, model, task) {
+        return Some(result);
+    }
+    // Fall back to noise-stripped model (strip quantization, date codes, -latest)
+    let stripped = strip_model_noise(model);
+    if stripped != normalize_identifier(model) {
+        find_benchmark_raw(benchmarks, &stripped, task)
+    } else {
+        None
+    }
+}
+
+fn find_benchmark_raw<'a>(
+    benchmarks: &'a BTreeMap<String, Vec<BenchmarkModel>>,
+    model: &str,
+    task: TaskKind,
+) -> Option<&'a BenchmarkModel> {
+    let mut best_exact: Option<(&BenchmarkModel, f64, usize)> = None;
+    let mut best_fallback: Option<(&BenchmarkModel, f64, usize)> = None;
+
     for (benchmark_id, models) in benchmarks {
-        if !benchmark_ids_match(model, benchmark_id) {
+        let is_exact = is_exact_benchmark_match(model, benchmark_id);
+        let matches = is_exact || benchmark_ids_match(model, benchmark_id);
+        if !matches {
             continue;
         }
+
         for benchmark in models {
             let Some(score) = quality_for(benchmark, task) else {
                 continue;
             };
-            if best.is_none_or(|(_, best_score)| score > best_score) {
-                best = Some((benchmark, score));
+
+            let mut effective_score = score;
+            let non_null_count = [
+                benchmark.intelligence,
+                benchmark.coding_quality,
+                benchmark.agentic_quality,
+            ]
+            .iter()
+            .flatten()
+            .count();
+
+            if !is_exact {
+                effective_score -= variant_prefix_penalty(model, benchmark_id);
+            }
+
+            let target = if is_exact {
+                &mut best_exact
+            } else {
+                &mut best_fallback
+            };
+
+            let should_update = match target {
+                None => true,
+                Some((_, best_score, best_count)) => {
+                    effective_score > *best_score
+                        || (effective_score == *best_score && non_null_count > *best_count)
+                }
+            };
+            if should_update {
+                *target = Some((benchmark, effective_score, non_null_count));
             }
         }
     }
-    best.map(|(benchmark, _)| benchmark)
+
+    best_exact.or(best_fallback).map(|(b, _, _)| b)
+}
+
+fn is_exact_benchmark_match(catalog_id: &str, benchmark_id: &str) -> bool {
+    let catalog_variants = normalized_identifier_variants(catalog_id);
+    let benchmark_variants = normalized_identifier_variants(benchmark_id);
+    for catalog in &catalog_variants {
+        for benchmark in &benchmark_variants {
+            if catalog == benchmark {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+const VARIANT_KEYWORDS: &[&str] = &[
+    "free",
+    "pro",
+    "flash",
+    "lite",
+    "reasoning",
+    "non-reasoning",
+    "preview",
+    "medium",
+    "thinking",
+    "deep-think",
+    "max",
+    "mini",
+    "highspeed",
+    "omni",
+];
+
+const NOISE_TOKENS: &[&str] = &[
+    "fp8", "fp16", "bf16", "int4", "int8", "latest", "thinking", "free",
+];
+
+fn strip_model_noise(model: &str) -> String {
+    let segments: Vec<&str> = model.split(['/', ':']).collect();
+    let stripped: Vec<String> = segments
+        .iter()
+        .map(|segment| {
+            let normalized = normalize_identifier(segment);
+            let mut tokens: Vec<&str> = normalized.split('-').collect();
+
+            // Remove known quantization/version tokens
+            tokens.retain(|t| !NOISE_TOKENS.contains(t));
+
+            // Remove trailing date codes (4 consecutive digits, e.g. 2512, 2407)
+            // Only from the LAST segment of a multi-segment ID
+            while let Some(last) = tokens.last() {
+                if last.len() == 4 && last.chars().all(|c| c.is_ascii_digit()) {
+                    tokens.pop();
+                } else {
+                    break;
+                }
+            }
+
+            tokens.join("-")
+        })
+        .collect();
+    stripped.join("/")
+}
+
+fn variant_prefix_penalty(catalog_id: &str, benchmark_id: &str) -> f64 {
+    let catalog_normalized = normalize_identifier(catalog_id);
+    let benchmark_normalized = normalize_identifier(benchmark_id);
+    let catalog_tokens = catalog_normalized
+        .split('-')
+        .collect::<std::collections::BTreeSet<_>>();
+    let benchmark_tokens = benchmark_normalized
+        .split('-')
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let additional: Vec<_> = benchmark_tokens.difference(&catalog_tokens).collect();
+    let mut penalty = 0.0;
+    for token in additional {
+        if VARIANT_KEYWORDS.contains(token) {
+            penalty += 100.0;
+        }
+    }
+    penalty
 }
 
 fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
@@ -250,12 +383,57 @@ fn benchmark_ids_match(catalog_id: &str, benchmark_id: &str) -> bool {
             }
         }
     }
+
+    // Token-level suffix prefix matching: when provider prefix differs
+    // between catalog and AA (e.g. "nemotron-3-ultra" vs
+    // "nvidia-nemotron-3-ultra-550b-a55b"). Uses prefix-only to avoid
+    // false exact matches on shared generic suffixes.
+    for catalog in &catalog_variants {
+        let cat_tokens: Vec<&str> = catalog.split('-').collect();
+        for benchmark in &benchmark_variants {
+            let bench_tokens: Vec<&str> = benchmark.split('-').collect();
+            for cat_start in 0..cat_tokens.len() {
+                let cat_suffix = cat_tokens[cat_start..].join("-");
+                let cat_suffix_len = cat_tokens.len() - cat_start;
+                for bench_start in 0..bench_tokens.len() {
+                    let bench_suffix = bench_tokens[bench_start..].join("-");
+                    let bench_suffix_len = bench_tokens.len() - bench_start;
+                    if cat_suffix == bench_suffix {
+                        continue;
+                    }
+                    // Require at least 3 tokens in the shorter suffix
+                    // to avoid false matches on short generic suffixes
+                    if cat_suffix_len.min(bench_suffix_len) < 3 {
+                        continue;
+                    }
+                    if cat_suffix.starts_with(&format!("{bench_suffix}-"))
+                        || bench_suffix.starts_with(&format!("{cat_suffix}-"))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
     false
 }
 
+/// Known model ID normalizations for cases where the catalog and AA
+/// use different naming conventions for the same model.
+const MODEL_ID_NORMALIZATIONS: &[(&str, &str)] =
+    &[("gemma4:", "gemma-4:"), ("gemma4/", "gemma-4/")];
+
 fn normalized_identifier_variants(identifier: &str) -> Vec<String> {
-    let segments = identifier
-        .split('/')
+    let mut normalized = identifier.to_owned();
+    for (from, to) in MODEL_ID_NORMALIZATIONS {
+        if normalized.contains(from) {
+            normalized = normalized.replace(from, to);
+            break;
+        }
+    }
+    let segments = normalized
+        .split(['/', ':'])
         .map(normalize_identifier)
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
@@ -3297,9 +3475,10 @@ mod tests {
 
     use super::{
         RequestRequirements, StreamChoice, benchmark_ids_match, decorate_json_response,
-        estimate_request_tokens, expected_cost_microusd, find_benchmark, is_fallback_status,
-        log_request, malformed_sse_event, rank_benchmark_models, rate_limit_reset_delay,
-        request_id, session_material, take_sse_event, transform_sse_event,
+        estimate_request_tokens, expected_cost_microusd, find_benchmark, find_benchmark_raw,
+        is_fallback_status, log_request, malformed_sse_event, rank_benchmark_models,
+        rate_limit_reset_delay, request_id, session_material, strip_model_noise, take_sse_event,
+        transform_sse_event,
     };
     use crate::benchmarks::{BenchmarkModel, TaskKind};
     use axum::http::{HeaderMap, StatusCode};
@@ -3375,6 +3554,111 @@ mod tests {
                 .intelligence,
             Some(80.0)
         );
+    }
+
+    #[test]
+    fn find_benchmark_prefers_exact_over_prefix_and_penalizes_variant_keywords() {
+        let mut benchmarks = BTreeMap::new();
+        // Exact match: mimo-v2-flash → mimo-v2-flash (G=24.7), NOT mimo-v2-flash-reasoning (G=31.2)
+        benchmarks.insert(
+            "mimo-v2-flash".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "mimo-v2-flash",
+                24.7,
+                49.8,
+                12.0,
+                1.0,
+                1.0,
+            )],
+        );
+        benchmarks.insert(
+            "mimo-v2-flash-reasoning".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "mimo-v2-flash-reasoning",
+                31.2,
+                86.8,
+                95.0,
+                1.0,
+                1.0,
+            )],
+        );
+        let result = find_benchmark(&benchmarks, "xiaomimimo/mimo-v2-flash", TaskKind::General)
+            .expect("mimo-v2-flash");
+        assert_eq!(result.intelligence, Some(24.7));
+        assert_eq!(result.coding_quality, Some(49.8));
+
+        // Prefix match with variant-keyword penalty: mimo-v2.5 should get mimo-v2-5-0424,
+        // NOT the higher-scoring mimo-v2-5-pro (penalized for "pro" keyword)
+        let mut benchmarks = BTreeMap::new();
+        benchmarks.insert(
+            "mimo-v2-5-0424".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "mimo-v2-5-0424",
+                37.2,
+                56.8,
+                23.7,
+                1.0,
+                1.0,
+            )],
+        );
+        benchmarks.insert(
+            "mimo-v2-5-pro".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "mimo-v2-5-pro",
+                42.2,
+                60.2,
+                29.1,
+                1.0,
+                1.0,
+            )],
+        );
+        benchmarks.insert(
+            "mimo-v2-5-pro-non-reasoning".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "mimo-v2-5-pro-non-reasoning",
+                27.9,
+                39.1,
+                72.5,
+                1.0,
+                1.0,
+            )],
+        );
+        let result = find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5", TaskKind::General)
+            .expect("mimo-v2.5");
+        assert_eq!(result.intelligence, Some(37.2));
+        assert_eq!(
+            result.id, "mimo-v2-5-0424",
+            "should prefer base variant over penalized keywords"
+        );
+
+        // When only variant-keyword benchmarks exist, pick the least-penalized
+        let mut benchmarks = BTreeMap::new();
+        benchmarks.insert(
+            "mimo-v2-5-pro".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "mimo-v2-5-pro",
+                42.2,
+                60.2,
+                29.1,
+                1.0,
+                1.0,
+            )],
+        );
+        benchmarks.insert(
+            "mimo-v2-5-pro-non-reasoning".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "mimo-v2-5-pro-non-reasoning",
+                27.9,
+                39.1,
+                72.5,
+                1.0,
+                1.0,
+            )],
+        );
+        let result = find_benchmark(&benchmarks, "xiaomimimo/mimo-v2.5", TaskKind::General)
+            .expect("mimo-v2.5 pro only");
+        assert_eq!(result.intelligence, Some(42.2));
+        assert_eq!(result.id, "mimo-v2-5-pro");
     }
 
     #[test]
@@ -3552,5 +3836,144 @@ mod tests {
         headers.remove("x-session-id");
         let material = session_material(&headers, &without_body).expect("message material");
         assert!(material.contains("private"));
+    }
+
+    #[test]
+    fn strip_model_noise_removes_quantization_suffixes() {
+        assert_eq!(
+            strip_model_noise("qwen/qwen3-30b-a3b-fp8"),
+            "qwen/qwen3-30b-a3b"
+        );
+        assert_eq!(strip_model_noise("qwen/qwen3-32b-fp8"), "qwen/qwen3-32b");
+        assert_eq!(
+            strip_model_noise("qwen/qwen3-235b-a22b-fp8"),
+            "qwen/qwen3-235b-a22b"
+        );
+    }
+
+    #[test]
+    fn strip_model_noise_removes_thinking_suffix() {
+        assert_eq!(
+            strip_model_noise("qwen/qwen3-235b-a22b-thinking-2507"),
+            "qwen/qwen3-235b-a22b"
+        );
+        assert_eq!(
+            strip_model_noise("qwen/qwen3-omni-30b-a3b-thinking"),
+            "qwen/qwen3-omni-30b-a3b"
+        );
+        assert_eq!(
+            strip_model_noise("qwen/qwen3-vl-235b-a22b-thinking"),
+            "qwen/qwen3-vl-235b-a22b"
+        );
+    }
+
+    #[test]
+    fn strip_model_noise_removes_latest_suffix() {
+        // "latest" is a noise token removed from any segment
+        assert_eq!(strip_model_noise("mistral-tiny-latest"), "mistral-tiny");
+        assert_eq!(strip_model_noise("ministral-14b-latest"), "ministral-14b");
+    }
+
+    #[test]
+    fn strip_model_noise_removes_date_codes() {
+        assert_eq!(strip_model_noise("ministral-14b-2512"), "ministral-14b");
+        assert_eq!(strip_model_noise("mistral-tiny-2407"), "mistral-tiny");
+        assert_eq!(
+            strip_model_noise("qwen/qwen3-30b-a3b-2507"),
+            "qwen/qwen3-30b-a3b"
+        );
+    }
+
+    #[test]
+    fn strip_model_noise_leaves_pure_model_ids_unchanged() {
+        // Single segment with no noise: unchanged
+        assert_eq!(
+            strip_model_noise("qwen/qwen3.6-35b-a3b"),
+            "qwen/qwen3-6-35b-a3b"
+        );
+        // No noise tokens to strip
+        assert_eq!(
+            strip_model_noise("deepseek/deepseek-v4-flash"),
+            "deepseek/deepseek-v4-flash"
+        );
+        // No /, single segment, no noise
+        assert_eq!(strip_model_noise("gemini-2-5-flash"), "gemini-2-5-flash");
+    }
+
+    #[test]
+    fn find_benchmark_falls_back_to_noise_stripped_catalog_id() {
+        let mut benchmarks = std::collections::BTreeMap::new();
+        // AA benchmark without quantization suffix
+        benchmarks.insert(
+            "qwen3-30b-a3b-instruct".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "qwen3-30b-a3b-instruct",
+                6.8,
+                10.2,
+                8.5,
+                1.0,
+                1.0,
+            )],
+        );
+        // Catalog has -fp8 suffix that should be stripped
+        let result = find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8", TaskKind::General)
+            .expect("noise-stripped match");
+        assert_eq!(result.intelligence, Some(6.8));
+        assert_eq!(result.id, "qwen3-30b-a3b-instruct");
+    }
+
+    #[test]
+    fn noise_stripped_matching_uses_original_model_when_match_exists() {
+        let mut benchmarks = std::collections::BTreeMap::new();
+        // Benchmark for the original (unstoned) model ID
+        benchmarks.insert(
+            "qwen3-30b-a3b".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "qwen3-30b-a3b",
+                10.0,
+                12.0,
+                9.0,
+                1.0,
+                1.0,
+            )],
+        );
+        // Benchmark for the noise-stripped version
+        benchmarks.insert(
+            "qwen3-30b-a3b-instruct".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "qwen3-30b-a3b-instruct",
+                6.8,
+                10.2,
+                8.5,
+                1.0,
+                1.0,
+            )],
+        );
+        // Should prefer the original match (stripped = "qwen-qwen3-30b-a3b" matches "qwen3-30b-a3b")
+        let result = find_benchmark(&benchmarks, "qwen/qwen3-30b-a3b-fp8", TaskKind::General)
+            .expect("noise-stripped match");
+        // The noise-stripped model "qwen-qwen3-30b-a3b" has an exact match
+        // with the benchmark "qwen3-30b-a3b", which has higher score (10.0 vs 6.8)
+        assert_eq!(result.intelligence, Some(10.0));
+    }
+
+    #[test]
+    fn find_benchmark_raw_still_works_without_noise() {
+        let mut benchmarks = std::collections::BTreeMap::new();
+        benchmarks.insert(
+            "gemini-2-5-flash".to_owned(),
+            vec![BenchmarkModel::fixture(
+                "gemini-2-5-flash",
+                80.0,
+                70.0,
+                60.0,
+                1.0,
+                1.0,
+            )],
+        );
+        // find_benchmark_raw should still match correctly
+        let result = find_benchmark_raw(&benchmarks, "models/gemini-2.5-flash", TaskKind::General)
+            .expect("raw match");
+        assert_eq!(result.intelligence, Some(80.0));
     }
 }

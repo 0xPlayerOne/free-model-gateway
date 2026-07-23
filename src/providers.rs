@@ -526,7 +526,7 @@ fn is_audio_model(model: &str) -> bool {
     tokens.iter().any(|token| {
         matches!(
             *token,
-            "whisper" | "tts" | "speech" | "audio" | "transcribe" | "voxtral" | "lyria"
+            "whisper" | "tts" | "speech" | "audio" | "transcribe" | "voxtral" | "lyria" | "riva"
         )
     }) || normalized.contains("fish-speech")
         || normalized.contains("cosyvoice")
@@ -540,10 +540,12 @@ fn is_image_gen_model(model: &str) -> bool {
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
         .collect();
-    tokens
-        .iter()
-        .any(|token| matches!(*token, "flux" | "imagen" | "sdxl" | "dalle" | "dall"))
-        || normalized.contains("stable-diffusion")
+    tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "flux" | "imagen" | "sdxl" | "dalle" | "dall" | "banana"
+        )
+    }) || normalized.contains("stable-diffusion")
         || normalized.contains("diffusion")
         || normalized.ends_with("-image")
         || normalized.contains("-image-")
@@ -596,6 +598,68 @@ fn is_ocr_model(model: &str) -> bool {
         .any(|token| *token == "ocr" || token.ends_with("ocr"))
 }
 
+/// Detects old-generation models that AA no longer benchmarks.
+/// These are from discontinued model families or versions that AA has
+/// moved past (e.g. llama2 → llama-3, gemma-2 → gemma-4, phi-3 → phi-4).
+fn is_old_generation_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    // Normalize non-alphanumeric characters to hyphens for pattern matching
+    let hypen_normalized: String = normalized
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    // Token-level markers for clearly discontinued/old model families
+    let old_tokens = [
+        "llama2",
+        "codellama",
+        "codegemma",
+        "recurrentgemma",
+        "neva",
+        "vila",
+        "kosmos",
+        "wizardlm",
+        "openchat",
+        "mythomax",
+        "sao10k",
+        "teknium",
+        "lunaris",
+        "euryale",
+        "ai_infer_test",
+        "bunny",
+        "elephant",
+        "gt-4p",
+        "deplot",
+        "palmyra",
+        "autoglm",
+        "prover",
+        "ising",
+        "yi",
+        "fuyu",
+        "starcoder2",
+        "solar",
+        "mixtral",
+        "nous-hermes",
+    ];
+
+    if tokens.iter().any(|t| old_tokens.contains(t)) {
+        return true;
+    }
+
+    // Multi-token patterns (use hypen-normalized form for consistency)
+    let old_patterns = ["sea-lion", "granite-3-0-", "granite-34b-", "phi-3-"];
+    old_patterns.iter().any(|p| hypen_normalized.contains(p))
+}
+
+fn is_robotics_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    normalized.contains("robotics")
+}
+
 fn is_safety_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
     let tokens: Vec<&str> = normalized
@@ -640,6 +704,8 @@ pub fn is_specialty_model(model: &str) -> bool {
         || is_safety_model(model)
         || is_classifier_model(model)
         || is_retrieval_model(model)
+        || is_robotics_model(model)
+        || is_old_generation_model(model)
 }
 
 fn number_at(value: &serde_json::Value, key: &str) -> Option<f64> {
@@ -657,8 +723,8 @@ mod tests {
 
     use super::{
         BuiltinProvider, CatalogModel, PROFILE_DEFINITIONS, is_audio_model, is_classifier_model,
-        is_embedding_model, is_image_gen_model, is_retrieval_model, is_safety_model,
-        is_specialty_model, is_video_gen_model, number_at,
+        is_embedding_model, is_image_gen_model, is_old_generation_model, is_retrieval_model,
+        is_robotics_model, is_safety_model, is_specialty_model, is_video_gen_model, number_at,
     };
     use crate::config::AdapterKind;
 
@@ -842,6 +908,35 @@ mod tests {
         assert!(is_retrieval_model("nvidia/nemoretriever-parse"));
         assert!(is_retrieval_model("nvidia/nemotron-parse"));
         assert!(is_specialty_model("nvidia/nemoretriever-parse"));
+        // Banana — image generation
+        assert!(is_image_gen_model("models/nano-banana-pro-preview"));
+        assert!(is_specialty_model("models/nano-banana-pro-preview"));
+        // Gemini robotics
+        assert!(is_robotics_model("models/gemini-robotics-er-1.5-preview"));
+        assert!(is_robotics_model("models/gemini-robotics-er-1.6-preview"));
+        assert!(is_specialty_model("models/gemini-robotics-er-1.5-preview"));
+        // Old generation / dropped models
+        assert!(is_old_generation_model("01-ai/yi-large"));
+        assert!(is_old_generation_model("meta/llama2-70b"));
+        assert!(is_old_generation_model("adept/fuyu-8b"));
+        assert!(is_old_generation_model("bigcode/starcoder2-15b"));
+        assert!(is_old_generation_model("google/codegemma-1.1-7b"));
+        assert!(is_old_generation_model("google/recurrentgemma-2b"));
+        assert!(is_old_generation_model(
+            "microsoft/phi-3-vision-128k-instruct"
+        ));
+        assert!(is_old_generation_model("microsoft/phi-3.5-moe-instruct"));
+        assert!(is_old_generation_model("microsoft/wizardlm-2-8x22b"));
+        assert!(is_old_generation_model("nvidia/neva-22b"));
+        assert!(is_old_generation_model("upstage/solar-10.7b-instruct"));
+        assert!(is_old_generation_model("writer/palmyra-creative-122b"));
+        assert!(is_old_generation_model("aisingapore/sea-lion-7b-instruct"));
+        assert!(is_specialty_model("01-ai/yi-large"));
+        assert!(is_specialty_model("meta/llama2-70b"));
+        // Current models should NOT be flagged
+        assert!(!is_old_generation_model("qwen/qwen3-30b-a3b"));
+        assert!(!is_old_generation_model("deepseek/deepseek-v4-flash"));
+        assert!(!is_old_generation_model("models/gemini-3.5-flash"));
         assert!(is_specialty_model("nvidia/nemotron-parse"));
         // Video detector — classifier
         assert!(is_classifier_model("nvidia/ai-synthetic-video-detector"));
