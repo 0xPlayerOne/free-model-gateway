@@ -12,7 +12,7 @@ use crate::benchmarks::BenchmarkModel;
 use crate::config::{
     BillingMode, ProviderConfig, ProviderProfileId, QuotaBoundary, QuotaKind, QuotaLimit,
 };
-use crate::providers::{AccountLimit, is_embedding_model};
+use crate::providers::{AccountLimit, is_specialty_model};
 
 #[derive(Debug, Error)]
 pub enum RoutingError {
@@ -363,7 +363,7 @@ impl RoutingStore {
         let transaction = connection.transaction()?;
         transaction.execute("DELETE FROM catalog_models WHERE provider = ?1", [provider])?;
         for model in models {
-            if is_embedding_model(&model.model) {
+            if is_specialty_model(&model.model) {
                 continue;
             }
             transaction.execute(

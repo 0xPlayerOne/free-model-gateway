@@ -446,7 +446,7 @@ pub fn fetch_catalog(
         .iter()
         .filter_map(|item| {
             let id = item.get("id").and_then(serde_json::Value::as_str)?;
-            if is_embedding_model(id) {
+            if is_specialty_model(id) {
                 return None;
             }
             let pricing = item.get("pricing");
@@ -497,6 +497,79 @@ pub fn fetch_catalog(
         .collect())
 }
 
+pub fn is_specialty_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    // Embedding models
+    if tokens
+        .iter()
+        .any(|token| matches!(*token, "embed" | "embeddings" | "embedding"))
+        || normalized.contains("text-embedding")
+        || normalized.contains("mistral-embed")
+        || normalized.contains("jina-embeddings")
+        || normalized.contains("nomic-embed")
+        || normalized.contains("nv-embed")
+        || normalized.contains("bge-")
+        || normalized.contains("gte-")
+        || normalized.contains("e5-")
+    {
+        return true;
+    }
+
+    // Audio/Speech/TTS models
+    if tokens
+        .iter()
+        .any(|token| matches!(*token, "whisper" | "tts" | "speech" | "audio" | "transcribe" | "voxtral"))
+    {
+        return true;
+    }
+    if normalized.contains("fish-speech")
+        || normalized.contains("cosyvoice")
+        || normalized.contains("indextts")
+        || normalized.contains("orpheus")
+    {
+        return true;
+    }
+
+    // Image/Video generation models
+    if tokens
+        .iter()
+        .any(|token| matches!(*token, "flux" | "imagen" | "sdxl" | "dalle" | "dall"))
+    {
+        return true;
+    }
+    if normalized.contains("stable-diffusion") {
+        return true;
+    }
+    // Wan video generation (T2V/I2V)
+    if normalized.contains("wan") && tokens.iter().any(|t| *t == "v" || t.ends_with("v")) {
+        return true;
+    }
+    // Models with "-image" suffix that aren't vision-language
+    if normalized.ends_with("-image") || normalized.contains("-image-") || normalized.contains("-image-preview") {
+        return true;
+    }
+    // Standalone "image" token that isn't VL/vision
+    if tokens.contains(&"image") && !normalized.contains("vl") && !normalized.contains("-vision") {
+        return true;
+    }
+
+    // Reranker, Moderation, OCR models
+    if tokens
+        .iter()
+        .any(|token| matches!(*token, "rerank" | "reranker"))
+        || tokens.iter().any(|token| token.starts_with("moderat") || *token == "ocr" || token.ends_with("ocr"))
+    {
+        return true;
+    }
+
+    false
+}
+
 pub fn is_embedding_model(model: &str) -> bool {
     let normalized = model.to_ascii_lowercase();
     let tokens = normalized
@@ -530,7 +603,7 @@ mod tests {
     use std::thread;
 
     use super::{
-        BuiltinProvider, CatalogModel, PROFILE_DEFINITIONS, is_embedding_model, number_at,
+        BuiltinProvider, CatalogModel, PROFILE_DEFINITIONS, is_embedding_model, is_specialty_model, number_at,
     };
     use crate::config::AdapterKind;
 
@@ -611,6 +684,56 @@ mod tests {
         }
         assert!(!is_embedding_model("gemini-2.5-flash"));
         assert!(!is_embedding_model("llama-3.3-70b-versatile"));
+    }
+
+    #[test]
+    fn specialty_model_detection_covers_audio_image_reranker_and_ocr() {
+        for model in [
+            // Audio/Speech/TTS
+            "whisper-large-v3",
+            "models/gemini-2.5-flash-preview-tts",
+            "models/gemini-2.5-flash-native-audio-latest",
+            "voxtral-mini-tts-2603",
+            "voxtral-mini-transcribe-realtime-2602",
+            "canopylabs/orpheus-v1-english",
+            "fishaudio/fish-speech-1.5",
+            "FunAudioLLM/CosyVoice2-0.5B",
+            "IndexTeam/IndexTTS-2",
+            // Image/Video generation
+            "black-forest-labs/FLUX.1-dev",
+            "models/imagen-4.0-generate-001",
+            "Wan-AI/Wan2.2-T2V-A14B",
+            "Wan-AI/Wan2.2-I2V-A14B",
+            "Qwen/Qwen-Image",
+            "Qwen/Qwen-Image-Edit",
+            "Tongyi-MAI/Z-Image-Turbo",
+            "models/gemini-3.1-flash-image",
+            // Reranker / Moderation / OCR
+            "Qwen/Qwen3-Reranker-0.6B",
+            "mistral-moderation-2603",
+            "deepseek/deepseek-ocr",
+            "mistral-ocr-latest",
+            "paddlepaddle/paddleocr-vl",
+        ] {
+            assert!(
+                is_specialty_model(model),
+                "expected specialty model: {model}"
+            );
+        }
+        // Vision-language models should NOT be filtered (they handle text too)
+        for model in [
+            "Qwen/Qwen3-VL-30B-A3B-Instruct",
+            "meta/llama-3.2-11b-vision-instruct",
+            "baidu/ernie-4.5-vl-28b-a3b",
+            "qwen/qwen2.5-vl-72b-instruct",
+            "gemini-2.5-flash",
+            "deepseek-ai/DeepSeek-V3",
+        ] {
+            assert!(
+                !is_specialty_model(model),
+                "expected non-specialty model: {model}"
+            );
+        }
     }
 
     #[test]
