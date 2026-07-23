@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${MODEL_GATEWAY_PORT:-8008}"
+LOG="$ROOT/server.log"
+PIDFILE="$ROOT/server.pid"
 
 # Source .env.local if it exists
 ENV_LOCAL="$ROOT/.env.local"
@@ -12,5 +14,43 @@ if [ -f "$ENV_LOCAL" ]; then
     set +a
 fi
 
-echo "Starting model-gateway on port $PORT..."
-exec cargo run --release --manifest-path "$ROOT/Cargo.toml" -- serve
+FOLLOW=false
+if [ "${1:-}" = "--follow" ] || [ "${1:-}" = "-f" ]; then
+    FOLLOW=true
+fi
+
+if [ -f "$PIDFILE" ]; then
+    OLD_PID=$(cat "$PIDFILE")
+    if kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "Server is already running (PID $OLD_PID). Use 'scripts/restart-server.sh' to restart."
+        exit 1
+    fi
+    rm -f "$PIDFILE"
+fi
+
+echo "Building release binary..."
+cargo build --release --manifest-path "$ROOT/Cargo.toml" 2>&1
+
+BIN="$ROOT/target/release/model-gateway"
+
+if [ "$FOLLOW" = true ]; then
+    echo "Starting server on port $PORT (foreground)..."
+    exec "$BIN" serve
+else
+    echo "Starting server on port $PORT (background, PID file: $PIDFILE)..."
+    nohup "$BIN" serve > "$LOG" 2>&1 &
+    PID=$!
+    echo "$PID" > "$PIDFILE"
+
+    # Wait for the port to be ready
+    for i in $(seq 1 30); do
+        if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "Server is ready (PID $PID, logs: $LOG)"
+            exit 0
+        fi
+        sleep 0.5
+    done
+
+    echo "Server started but port $PORT is not yet listening. Check logs: $LOG"
+    exit 1
+fi
