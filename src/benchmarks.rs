@@ -479,7 +479,7 @@ pub fn parse_artificial_analysis(body: &Value) -> Result<Vec<BenchmarkModel>, St
                 latency_seconds: number(performance, "median_time_to_first_token_seconds")
                     .or_else(|| number(item, "median_time_to_first_token_seconds")),
                 output_tokens_per_task: None,
-                reasoning_effort: None,
+                reasoning_effort: aa_reasoning_effort(item),
                 as_of: Some(epoch_date_string()),
                 harness: None,
                 release_date: item
@@ -534,6 +534,30 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     (year, month, day)
+}
+
+fn aa_reasoning_effort(item: &Value) -> Option<String> {
+    let name = item.get("name").and_then(Value::as_str)?;
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("non-reasoning") || lower.contains("(non") {
+        return None;
+    }
+    if lower.contains("(xhigh") || lower.ends_with("-xhigh") {
+        return Some("xhigh".to_owned());
+    }
+    if lower.contains("(max") {
+        return Some("max".to_owned());
+    }
+    if lower.contains("(high") || lower.ends_with("-high") {
+        return Some("high".to_owned());
+    }
+    if lower.contains("(medium") || lower.ends_with("-medium") {
+        return Some("medium".to_owned());
+    }
+    if lower.contains("(low") || lower.ends_with("-low") {
+        return Some("low".to_owned());
+    }
+    None
 }
 
 #[cfg(test)]
@@ -650,6 +674,26 @@ mod tests {
             models: vec![incomparable],
         };
         assert!(import.normalize().is_err());
+    }
+
+    #[test]
+    fn aa_max_maps_to_max_not_high() {
+        use serde_json::json;
+
+        let max = json!({"name": "GPT-5.6 Terra (max)"});
+        assert_eq!(super::aa_reasoning_effort(&max), Some("max".to_owned()));
+
+        let high = json!({"name": "GPT-5.6 Sol (high)"});
+        assert_eq!(super::aa_reasoning_effort(&high), Some("high".to_owned()));
+
+        let xhigh = json!({"name": "GPT-5.6 Sol (xhigh)"});
+        assert_eq!(super::aa_reasoning_effort(&xhigh), Some("xhigh".to_owned()));
+
+        let low = json!({"name": "GPT-5.6 Sol (low)"});
+        assert_eq!(super::aa_reasoning_effort(&low), Some("low".to_owned()));
+
+        let none = json!({"name": "GPT-5.6 Terra (Non-reasoning)"});
+        assert_eq!(super::aa_reasoning_effort(&none), None);
     }
 
     #[test]
