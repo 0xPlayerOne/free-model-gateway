@@ -184,7 +184,7 @@ impl Default for SecretResolver {
                     None,
                     None,
                 ),
-                Some("environment") => (None, None, None),
+                Some("environment") => (configured_files, None, None),
                 Some(value) => (None, None, Some(value.to_owned())),
             };
         Self {
