@@ -1215,10 +1215,14 @@ pub fn quota_reference(provider: &ProviderConfig, model: &str) -> Option<QuotaRe
             "account",
         ),
         Some(ProviderProfileId::NousPortal) => (
-            vec![requests(10, 60)],
+            vec![
+                requests(50, 60),
+                tokens(500_000, 60),
+                requests(2_100, 3_600),
+            ],
             "https://inference-api.nousresearch.com/v1",
-            "published_partial",
-            "account",
+            "probe_verified_2026-07-23",
+            "account_model",
         ),
         Some(ProviderProfileId::SiliconFlow) => (
             vec![requests(1_000, 60), tokens(40_000, 60)],

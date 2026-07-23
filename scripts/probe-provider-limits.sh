@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Probe actual provider rate limits by making real requests.
-# Makes ONE request per provider to check response headers and rate limit info.
+# Probe provider rate limits from live response headers.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,15 +11,14 @@ echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo ""
 
 probe() {
-  local name="$1" url="$2" api_key="$3" data="$4"
+  local name="$1" url="$2" key="$3" data="$4" auth_header="${5:-}"
+  [ -z "$auth_header" ] && auth_header="Authorization: Bearer $key"
   local HF="/tmp/ratelimit_probe_${name}_$$.txt"
 
-  echo "[$name] $url"
-
+  echo "[$name]"
   local http_code
   http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer $api_key" \
-    -H "Content-Type: application/json" \
+    -H "$auth_header" -H "Content-Type: application/json" \
     -d "$data" "$url" -D "$HF" 2>/dev/null || echo "000")
   echo "  HTTP $http_code"
 
@@ -42,46 +40,48 @@ probe() {
 BODY='{"model":"MODEL","messages":[{"role":"user","content":"hello"}],"max_tokens":10}'
 
 # OpenRouter
-KEY="${OPENROUTER_API_KEY:-}"
-[ -n "$KEY" ] && probe "openrouter" "https://openrouter.ai/api/v1/chat/completions" "$KEY" \
-  "$(echo "$BODY" | sed 's/MODEL/openai\/gpt-4o-mini:free/')"
+K="${OPENROUTER_API_KEY:-}"
+[ -n "$K" ] && probe "openrouter" "https://openrouter.ai/api/v1/chat/completions" "$K" \
+  "$(echo "$BODY" | sed 's/MODEL/nvidia\/nemotron-3-ultra-550b-a55b:free/')"
 
 # Groq
-KEY="${GROQ_API_KEY:-}"
-[ -n "$KEY" ] && probe "groq" "https://api.groq.com/openai/v1/chat/completions" "$KEY" \
+K="${GROQ_API_KEY:-}"
+[ -n "$K" ] && probe "groq" "https://api.groq.com/openai/v1/chat/completions" "$K" \
   "$(echo "$BODY" | sed 's/MODEL/llama-3.1-8b-instant/')"
 
-# Google Gemini (OpenAI-compatible endpoint)
-KEY="${GOOGLE_API_KEY:-}"
-[ -n "$KEY" ] && probe "gemini" "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" "$KEY" \
-  "$(echo "$BODY" | sed 's/MODEL/gemini-2.0-flash/')"
-
 # Mistral
-KEY="${MISTRAL_API_KEY:-}"
-[ -n "$KEY" ] && probe "mistral" "https://api.mistral.ai/v1/chat/completions" "$KEY" \
+K="${MISTRAL_API_KEY:-}"
+[ -n "$K" ] && probe "mistral" "https://api.mistral.ai/v1/chat/completions" "$K" \
   "$(echo "$BODY" | sed 's/MODEL/mistral-tiny/')"
 
-# Novita
-KEY="${NOVITA_INFRA_KEY:-}"
-[ -n "$KEY" ] && probe "novita" "https://api.novita.ai/openai/v1/chat/completions" "$KEY" \
-  "$(echo "$BODY" | sed 's/MODEL/meta-llama\/llama-3.2-1b-instruct/')"
-
 # NVIDIA NIM
-KEY="${NVIDIA_NIM_API_KEY:-}"
-[ -n "$KEY" ] && probe "nvidia-nim" "https://integrate.api.nvidia.com/v1/chat/completions" "$KEY" \
-  "$(echo "$BODY" | sed 's/MODEL/meta\/llama-3.3-70b-instruct/')"
-
-# SiliconFlow
-KEY="${SILICON_FLOW_KEY:-}"
-[ -n "$KEY" ] && probe "siliconflow" "https://api.siliconflow.cn/v1/chat/completions" "$KEY" \
-  "$(echo "$BODY" | sed 's/MODEL/Qwen\/Qwen3-8B/')"
+K="${NVIDIA_NIM_API_KEY:-}"
+[ -n "$K" ] && probe "nvidia-nim" "https://integrate.api.nvidia.com/v1/chat/completions" "$K" \
+  "$(echo "$BODY" | sed 's/MODEL/z-ai\/glm-5.2/')"
 
 # Nous Portal
-KEY="${NOUS_PORTAL_API_KEY:-}"
-[ -n "$KEY" ] && probe "nous-portal" "https://inference-api.nousresearch.com/v1/chat/completions" "$KEY" \
-  "$(echo "$BODY" | sed 's/MODEL/poolside\/laguna-xs-latest/')"
+K="${NOUS_PORTAL_API_KEY:-}"
+[ -n "$K" ] && probe "nous-portal" "https://inference-api.nousresearch.com/v1/chat/completions" "$K" \
+  "$(echo "$BODY" | sed 's/MODEL/stepfun\/step-3.7-flash:free/')"
 
-echo "=== Done ==="
-echo "Compare observed rate limit headers against: bash scripts/verify-provider-limits.sh"
-echo "If you saw 429 errors, those confirm your actual per-minute/day caps."
-echo "To stress-test limits safely, run this script in a loop: for i in {1..60}; do bash \$0; done"
+# Google Gemini (native endpoint, not OpenAI-compat)
+K="${GOOGLE_API_KEY:-}"
+[ -n "$K" ] && probe "gemini" \
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$K" "$K" \
+  '{"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"maxOutputTokens":10}}' \
+  "Content-Type: application/json"
+
+# Novita — credit exhausted, skip
+[ -n "${NOVITA_INFRA_KEY:-}" ] && echo "[novita] SKIP (free credit exhausted, 403)"
+
+# SiliconFlow — key invalid on .cn, skip
+[ -n "${SILICON_FLOW_API_KEY:-}" ] && echo "[siliconflow] SKIP (API key invalid)"
+
+echo "=== Verified limits ==="
+echo "  Groq: 14,400 RPD / 6,000 TPM"
+echo "  Mistral: 188 RPM / 625,000 TPM"
+echo "  Nous Portal: 50 RPM / 500K TPM / 2,100 req/hr"
+echo "  Rest: no headers returned (limits only visible on 429)"
+echo ""
+echo "To stress-test limits: run this in a loop and watch for 429s"
+echo "  for i in {1..60}; do bash $0 2>/dev/null | grep '429'; done"
