@@ -768,8 +768,10 @@ async fn list_free_models(
                         "supports_vision": offering.supports_vision,
                         "supports_structured_output": offering.supports_structured_output,
                     },
-                    "input_price_per_million": offering.input_price_per_million,
-                    "output_price_per_million": offering.output_price_per_million,
+                    "input_price_per_million": offering.input_price_per_million
+                        .or_else(|| benchmark.as_ref().and_then(|b| b.input_price_per_million)),
+                    "output_price_per_million": offering.output_price_per_million
+                        .or_else(|| benchmark.as_ref().and_then(|b| b.output_price_per_million)),
                     "limit_status": limit_kind,
                     "reference_url": source_url,
                 })
