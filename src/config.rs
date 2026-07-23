@@ -1403,7 +1403,7 @@ const fn default_free_quality_min_context() -> u64 {
 }
 
 const fn default_free_quality_min_model_size() -> u64 {
-    7
+    27
 }
 
 const fn default_free_quality_max_age_months() -> u64 {
