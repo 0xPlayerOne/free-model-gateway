@@ -68,13 +68,7 @@ Expected cost is computed from the offering's input/output prices and estimated 
 
 ### Benchmarks Required
 
-Benchmarks are required for eligibility. Models without benchmarks are excluded. Get a free [Artificial Analysis API key](https://artificialanalysis.ai/), then:
-
-```bash
-model-gateway credentials set ARTIFICIAL_ANALYSIS_API_KEY
-```
-
-The server auto-fetches on startup if no fresh data exists. Manual: `model-gateway benchmarks refresh`.
+Benchmarks are required for eligibility. Models without benchmarks are excluded. See [benchmarks.md](benchmarks.md) for setup, API key configuration, attribution, and the `/v1/rankings` endpoint.
 
 ## `auto-frontier`
 
@@ -92,4 +86,4 @@ Listing endpoint for discovery. Returns all free models filtered by the quality 
 
 ## `/v1/rankings`
 
-Read-only view of fresh benchmark data. Sorted by quality score (descending). Supports `?task=` and `?limit=` query parameters. Never performs live benchmark requests.
+Read-only view of fresh benchmark data. Sorted by quality score (descending). Supports `?task=` and `?limit=` query parameters. Never performs live benchmark requests. See [benchmarks.md](benchmarks.md) for the full response format, setup, and attribution.

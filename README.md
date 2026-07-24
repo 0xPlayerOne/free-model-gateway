@@ -46,12 +46,12 @@ curl http://127.0.0.1:8008/v1/providers
 
 ## Built-in Routes
 
-| Route | Description |
-|---|---|
-| `local` | Relays the only model from an OpenAI-compatible endpoint (default `127.0.0.1:8000`). Use `MODEL_GATEWAY_LOCAL_MODEL` when the endpoint reports multiple models. |
-| `auto-free` | Selects the best free model for the task using benchmark quality, complexity floors, and Pareto efficiency. Falls back to `local` when exhausted. |
-| `auto-efficient` | Pareto-ranks all benchmarked models by quality vs cost vs latency. Requires paid billing authorization for cost-based providers. Falls back to `auto-free`, then `local`. |
-| `auto-frontier` | Same selector limited to OpenAI/Anthropic canonical creators. Requires explicit paid/subscription authorization. Never falls back. |
+| Route | Description | Benchmarks Required |
+|---|---|---|
+| `local` | Relays the only model from an OpenAI-compatible endpoint (default `127.0.0.1:8000`). | No |
+| `auto-free` | Selects the best free model using benchmark quality, complexity floors, and Pareto efficiency. Falls back to `local`. | Recommended (graceful fallback without) |
+| `auto-efficient` | Pareto-ranks all benchmarked models by quality vs cost vs latency. Falls back to `auto-free`, then `local`. | **Yes** |
+| `auto-frontier` | Same as auto-efficient, limited to OpenAI/Anthropic creators. Never falls back. | **Yes** |
 
 See [docs/routing.md](docs/routing.md) for detailed routing logic.
 
@@ -72,6 +72,17 @@ MODEL_GATEWAY_STATE_PATH=~/.config/model-gateway/routing.sqlite3
 ```
 
 Provider overrides use the normalized provider name (e.g., `MODEL_GATEWAY_OPENROUTER_BILLING_MODE=paid`). See [docs/configuration.md](docs/configuration.md) for the full list of supported overrides.
+
+## Benchmarks
+
+Quality benchmarks are sourced from [Artificial Analysis](https://artificialanalysis.ai/) and are **required** for `auto-efficient` and `auto-frontier` routing. Set up your API key:
+
+```bash
+export ARTIFICIAL_ANALYSIS_API_KEY="your-key"
+model-gateway benchmarks refresh
+```
+
+The gateway auto-fetches on startup if the key is configured with no fresh data. View live rankings at `/v1/rankings?task=coding&limit=20`. See [docs/benchmarks.md](docs/benchmarks.md) for full details on setup, configuration, and attribution.
 
 ## Free Models
 

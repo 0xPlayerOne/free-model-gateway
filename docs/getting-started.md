@@ -79,17 +79,11 @@ This collects individual provider errors and reports all failures at the end. Em
 
 ## Benchmarks
 
-Benchmarks are required for `auto-efficient` and `auto-frontier` routing:
+Benchmarks from [Artificial Analysis](https://artificialanalysis.ai/) are **required** for `auto-efficient` and `auto-frontier` routing. Set up:
 
 ```bash
 model-gateway credentials set ARTIFICIAL_ANALYSIS_API_KEY
-```
-
-The server auto-fetches benchmarks on startup if the key is configured and no fresh data exists. Manual refresh:
-
-```bash
 model-gateway benchmarks refresh
-model-gateway benchmarks status
 ```
 
-Benchmark data is parsed from [Artificial Analysis](https://artificialanalysis.ai/). Import from other sources with `model-gateway benchmarks import --file <path>`.
+The server auto-fetches on startup if the key is configured and no fresh data exists. See [docs/benchmarks.md](docs/benchmarks.md) for full details on ranking endpoint, configuration, and attribution.
