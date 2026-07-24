@@ -148,6 +148,14 @@ pub struct ServerConfig {
     pub auto_free_enabled: bool,
     #[serde(default = "default_true")]
     pub auto_efficient_enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_balanced_enabled: bool,
+    #[serde(default = "default_efficient_quality_floor")]
+    pub efficient_quality_floor: f64,
+    #[serde(default = "default_balanced_quality_floor")]
+    pub balanced_quality_floor: f64,
+    #[serde(default = "default_frontier_quality_floor")]
+    pub frontier_quality_floor_single: f64,
     #[serde(default)]
     pub free_models_quality: FreeModelsQualityBar,
     #[serde(default)]
@@ -520,6 +528,10 @@ impl Default for ServerConfig {
             auto_frontier_enabled: true,
             auto_free_enabled: true,
             auto_efficient_enabled: true,
+            auto_balanced_enabled: true,
+            efficient_quality_floor: default_efficient_quality_floor(),
+            balanced_quality_floor: default_balanced_quality_floor(),
+            frontier_quality_floor_single: default_frontier_quality_floor(),
             free_models_quality: FreeModelsQualityBar::default(),
             model_denylist: Vec::new(),
         }
@@ -698,6 +710,9 @@ impl Config {
                 > self.server.free_quality_floor.complex.agentic
             || self.server.free_quality_floor.complex.agentic
                 > self.server.free_quality_floor.very_complex.agentic
+            || !valid_quality_floor(self.server.efficient_quality_floor)
+            || !valid_quality_floor(self.server.balanced_quality_floor)
+            || !valid_quality_floor(self.server.frontier_quality_floor_single)
         {
             return Err(ConfigError::Invalid(
                 "benchmark age and ordered quality floors must be valid (0-100)".to_owned(),
@@ -1159,6 +1174,22 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
             .filter(|s| !s.is_empty())
             .collect();
     }
+    apply_env_bool(
+        "MODEL_GATEWAY_AUTO_BALANCED_ENABLED",
+        &mut server.auto_balanced_enabled,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_EFFICIENT_QUALITY_FLOOR",
+        &mut server.efficient_quality_floor,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_BALANCED_QUALITY_FLOOR",
+        &mut server.balanced_quality_floor,
+    )?;
+    apply_env_f64(
+        "MODEL_GATEWAY_FRONTIER_QUALITY_FLOOR",
+        &mut server.frontier_quality_floor_single,
+    )?;
     Ok(())
 }
 
@@ -1579,6 +1610,18 @@ const fn default_free_quality_max_output_price() -> f64 {
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_efficient_quality_floor() -> f64 {
+    40.0
+}
+
+const fn default_balanced_quality_floor() -> f64 {
+    60.0
+}
+
+const fn default_frontier_quality_floor() -> f64 {
+    80.0
 }
 
 const fn default_connect_timeout_seconds() -> u64 {

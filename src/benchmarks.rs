@@ -376,6 +376,13 @@ pub fn quality_for(model: &BenchmarkModel, task: TaskKind) -> Option<f64> {
     }
 }
 
+pub fn composite_quality(model: &BenchmarkModel) -> Option<f64> {
+    let intelligence = model.intelligence?;
+    let coding = model.coding_quality.unwrap_or(intelligence);
+    let agentic = model.agentic_quality.unwrap_or(intelligence);
+    Some(0.5 * intelligence + 0.3 * coding + 0.2 * agentic)
+}
+
 pub fn is_frontier_model(creator: Option<&str>, canonical_model: &str) -> bool {
     let Some(creator) = creator.map(str::trim) else {
         return false;
@@ -554,7 +561,8 @@ mod tests {
 
     use super::{
         BenchmarkImport, BenchmarkModel, Complexity, ScoredCandidate, TaskKind, classify,
-        is_frontier_model, is_preview_model, pareto_rank, parse_artificial_analysis,
+        composite_quality, is_frontier_model, is_preview_model, pareto_rank,
+        parse_artificial_analysis,
     };
 
     #[test]
@@ -756,5 +764,37 @@ mod tests {
         assert!(is_preview_model("claude_beta"));
         assert!(!is_preview_model("previewlabs/model"));
         assert!(!is_preview_model("openai/gpt-5"));
+    }
+
+    #[test]
+    fn composite_quality_uses_weighted_average() {
+        let model = BenchmarkModel::fixture("test", 80.0, 70.0, 60.0, 0.0, 0.0);
+        let quality = composite_quality(&model).expect("quality");
+        assert!((quality - (0.5 * 80.0 + 0.3 * 70.0 + 0.2 * 60.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn composite_quality_falls_back_to_intelligence() {
+        let mut model = BenchmarkModel::fixture("test", 80.0, 0.0, 0.0, 0.0, 0.0);
+        model.coding_quality = None;
+        model.agentic_quality = None;
+        let quality = composite_quality(&model).expect("quality");
+        assert!((quality - 80.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn composite_quality_returns_none_without_intelligence() {
+        let mut model = BenchmarkModel::fixture("test", 0.0, 0.0, 0.0, 0.0, 0.0);
+        model.intelligence = None;
+        assert!(composite_quality(&model).is_none());
+    }
+
+    #[test]
+    fn composite_quality_redistributes_partial_fallback() {
+        let mut model = BenchmarkModel::fixture("test", 80.0, 70.0, 0.0, 0.0, 0.0);
+        model.agentic_quality = None;
+        let quality = composite_quality(&model).expect("quality");
+        let expected = 0.5 * 80.0 + 0.3 * 70.0 + 0.2 * 80.0;
+        assert!((quality - expected).abs() < 0.01);
     }
 }
