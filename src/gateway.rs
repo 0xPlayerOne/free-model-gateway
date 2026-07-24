@@ -23,7 +23,7 @@ use crate::benchmarks::{
     BenchmarkImport, BenchmarkModel, Complexity, ScoredCandidate, TaskKind, classify,
     is_frontier_model, is_preview_model, pareto_rank, parse_artificial_analysis, quality_for,
 };
-use crate::config::{BillingMode, Config, ProviderConfig, QuotaKind, TargetConfig};
+use crate::config::{BillingMode, Config, ProviderConfig, QuotaKind, ServerConfig, TargetConfig};
 use crate::providers::prepare_request;
 use crate::routing::{
     ReservationOutcome, ReservationRelease, ReservationToken, RoutingError, RoutingStore,
@@ -627,11 +627,49 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
             })
             .cloned(),
     );
+    if let Ok(offerings) = routing_operation(state.routing.clone(), {
+        let max_age = state.config.server.catalog_max_age_seconds;
+        move |routing| routing.all_candidates(max_age)
+    })
+    .await
+    {
+        let model_denylist = &state.config.server.model_denylist;
+        for offering in &offerings {
+            if offering.is_free {
+                continue;
+            }
+            let Some(config) = state.config.providers.get(&offering.provider) else {
+                continue;
+            };
+            if !matches!(
+                config.billing_mode,
+                BillingMode::Paid | BillingMode::Subscription
+            ) {
+                continue;
+            }
+            let model_id = format!("{}/{}", offering.provider, offering.model);
+            if model_denylist
+                .iter()
+                .any(|d| d == &model_id || d == &offering.model)
+            {
+                continue;
+            }
+            ids.push(model_id);
+        }
+    }
     let data = ids
         .into_iter()
         .map(|id| json!({"id": id, "object": "model", "owned_by": "model-gateway"}))
         .collect::<Vec<_>>();
     Json(json!({"object": "list", "data": data}))
+}
+
+fn is_model_denied(model: &str, provider: &str, server: &ServerConfig) -> bool {
+    let full_id = format!("{provider}/{model}");
+    server
+        .model_denylist
+        .iter()
+        .any(|d| d == model || d == &full_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -867,6 +905,9 @@ async fn list_free_models(
                 .iter()
                 .any(|model| model == &offering.model)
         {
+            continue;
+        }
+        if is_model_denied(&offering.model, &offering.provider, &state.config.server) {
             continue;
         }
 
@@ -1148,6 +1189,9 @@ async fn list_paid_models(
             continue;
         }
         if offering.is_free {
+            continue;
+        }
+        if is_model_denied(&offering.model, &offering.provider, &state.config.server) {
             continue;
         }
 
@@ -1899,12 +1943,15 @@ async fn resolve_targets(
             .collect());
     }
     if let Some((provider_name, upstream_model)) = model.split_once('/') {
-        if state
-            .config
-            .providers
-            .get(provider_name)
-            .is_some_and(|provider| provider.allow_model_passthrough)
-        {
+        let provider = state.config.providers.get(provider_name);
+        let is_allowed = provider.is_some_and(|p| {
+            p.allow_model_passthrough
+                || matches!(
+                    p.billing_mode,
+                    BillingMode::Paid | BillingMode::Subscription
+                )
+        });
+        if is_allowed {
             return Ok(vec![selected_target(
                 state,
                 &TargetConfig {
@@ -2016,6 +2063,9 @@ async fn resolve_auto_free_targets(
                 || requirements.vision && offering.supports_vision == Some(false)
                 || requirements.structured && offering.supports_structured_output == Some(false)
             {
+                return None;
+            }
+            if is_model_denied(&offering.model, &offering.provider, &state.config.server) {
                 return None;
             }
             let reference = quota_reference(provider, &offering.model);
@@ -2339,6 +2389,9 @@ async fn resolve_benchmark_targets(
             frontier_reached_capability = true;
         }
         if capability_mismatch {
+            continue;
+        }
+        if is_model_denied(&offering.model, &offering.provider, &state.config.server) {
             continue;
         }
         if policy == BenchmarkPolicy::Frontier {

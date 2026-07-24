@@ -94,6 +94,8 @@ pub struct ServerConfig {
     pub free_quality_floor_medium: f64,
     #[serde(default = "default_free_quality_floor_complex")]
     pub free_quality_floor_complex: f64,
+    #[serde(default)]
+    pub model_denylist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,6 +471,7 @@ impl Default for ServerConfig {
             free_quality_floor_simple: default_free_quality_floor_simple(),
             free_quality_floor_medium: default_free_quality_floor_medium(),
             free_quality_floor_complex: default_free_quality_floor_complex(),
+            model_denylist: Vec::new(),
         }
     }
 }
@@ -1019,6 +1022,13 @@ fn apply_server_environment_overrides(server: &mut ServerConfig) -> Result<(), C
         "MODEL_GATEWAY_FREE_QUALITY_MAX_OUTPUT_PRICE",
         &mut server.free_models_quality.max_output_price_per_million,
     )?;
+    if let Ok(value) = env::var("MODEL_GATEWAY_MODEL_DENYLIST") {
+        server.model_denylist = value
+            .split(',')
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
     Ok(())
 }
 
