@@ -1652,7 +1652,12 @@ async fn auto_free_prefers_quality_model_for_complex_task() {
         }],
     );
     config.server.state_path = Some(state_path);
-    config.server.free_quality_floor_complex = 65.0;
+    config.server.free_quality_floor.complex.general = 65.0;
+    config.server.free_quality_floor.complex.coding = 65.0;
+    config.server.free_quality_floor.complex.agentic = 65.0;
+    config.server.free_quality_floor.very_complex.general = 65.0;
+    config.server.free_quality_floor.very_complex.coding = 65.0;
+    config.server.free_quality_floor.very_complex.agentic = 65.0;
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
         .post(format!("{gateway}/v1/chat/completions"))
@@ -1714,7 +1719,12 @@ async fn auto_free_complexity_floor_filters_underqualified() {
         }],
     );
     config.server.state_path = Some(state_path);
-    config.server.free_quality_floor_complex = 60.0;
+    config.server.free_quality_floor.complex.general = 60.0;
+    config.server.free_quality_floor.complex.coding = 60.0;
+    config.server.free_quality_floor.complex.agentic = 60.0;
+    config.server.free_quality_floor.very_complex.general = 60.0;
+    config.server.free_quality_floor.very_complex.coding = 60.0;
+    config.server.free_quality_floor.very_complex.agentic = 60.0;
     let gateway = spawn_gateway(config).await;
     let response = reqwest::Client::new()
         .post(format!("{gateway}/v1/chat/completions"))
@@ -2407,7 +2417,18 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
         }],
     );
     config.server.state_path = Some(state_path.clone());
-    config.server.frontier_quality_floor_simple = 70.0;
+    config.server.frontier_quality_floor.simple.general = 70.0;
+    config.server.frontier_quality_floor.simple.coding = 70.0;
+    config.server.frontier_quality_floor.simple.agentic = 70.0;
+    config.server.frontier_quality_floor.medium.general = 70.0;
+    config.server.frontier_quality_floor.medium.coding = 70.0;
+    config.server.frontier_quality_floor.medium.agentic = 70.0;
+    config.server.frontier_quality_floor.complex.general = 70.0;
+    config.server.frontier_quality_floor.complex.coding = 70.0;
+    config.server.frontier_quality_floor.complex.agentic = 70.0;
+    config.server.frontier_quality_floor.very_complex.general = 70.0;
+    config.server.frontier_quality_floor.very_complex.coding = 70.0;
+    config.server.frontier_quality_floor.very_complex.agentic = 70.0;
     let quality_gateway = spawn_gateway(config.clone()).await;
     let client = reqwest::Client::new();
     let response = client
@@ -2419,7 +2440,9 @@ async fn auto_frontier_reports_quality_capability_and_spend_exclusions() {
     let body: Value = response.json().await.expect("quality error JSON");
     assert_eq!(body["error"]["code"], "frontier_quality_floor_not_met");
 
-    config.server.frontier_quality_floor_simple = 50.0;
+    config.server.frontier_quality_floor.simple.general = 50.0;
+    config.server.frontier_quality_floor.simple.coding = 50.0;
+    config.server.frontier_quality_floor.simple.agentic = 50.0;
     let capability_gateway = spawn_gateway(config.clone()).await;
     let response = client
         .post(format!("{capability_gateway}/v1/chat/completions"))

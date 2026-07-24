@@ -23,7 +23,9 @@ use crate::benchmarks::{
     BenchmarkImport, BenchmarkModel, Complexity, ScoredCandidate, TaskKind, classify,
     is_frontier_model, is_preview_model, pareto_rank, parse_artificial_analysis, quality_for,
 };
-use crate::config::{BillingMode, Config, ProviderConfig, QuotaKind, ServerConfig, TargetConfig};
+use crate::config::{
+    BillingMode, Config, ProviderConfig, QuotaKind, ServerConfig, TargetConfig, TieredQualityFloors,
+};
 use crate::providers::prepare_request;
 use crate::routing::{
     CatalogOffering, ReservationOutcome, ReservationRelease, ReservationToken, RoutingError,
@@ -988,8 +990,8 @@ fn build_tier_routes(
     tasks: &[TaskKind],
     task_filter: Option<TaskKind>,
     complexities: &[Complexity],
-    quality_floors: &[f64; 4],
-    select: impl Fn(TaskKind, f64) -> Option<(Value, Option<Value>)>,
+    floors: &TieredQualityFloors,
+    select: impl Fn(TaskKind, Complexity, f64) -> Option<(Value, Option<Value>)>,
 ) -> Value {
     let mut result = json!({});
     for &task in tasks {
@@ -1000,9 +1002,9 @@ fn build_tier_routes(
         }
         let task_key = task.as_str();
         let mut entries = Vec::new();
-        for (i, &complexity) in complexities.iter().enumerate() {
-            let floor = quality_floors[i];
-            if let Some((primary, fallback)) = select(task, floor) {
+        for &complexity in complexities {
+            let floor = floors.floor_for(task, complexity);
+            if let Some((primary, fallback)) = select(task, complexity, floor) {
                 let mut entry = json!({
                     "complexity": complexity.as_str(),
                     "quality_floor": floor,
@@ -1033,18 +1035,6 @@ async fn list_auto_models(
     let task_filter = query.task_filter();
 
     let cfg = &state.config.server;
-    let efficient_floors = [
-        cfg.quality_floor_simple,
-        cfg.quality_floor_medium,
-        cfg.quality_floor_complex,
-        cfg.quality_floor_very_complex,
-    ];
-    let free_floors = [
-        cfg.free_quality_floor_simple,
-        cfg.free_quality_floor_medium,
-        cfg.free_quality_floor_complex,
-        cfg.free_quality_floor_very_complex,
-    ];
 
     let benchmark_max_age = cfg.benchmark_max_age_seconds;
     let catalog_max_age = cfg.catalog_max_age_seconds;
@@ -1071,12 +1061,12 @@ async fn list_auto_models(
         routes.insert("efficient".to_owned(), json!({
             "label": "Auto-Efficient",
             "tiers": {
-                "simple": {"quality_floor": efficient_floors[0]},
-                "medium": {"quality_floor": efficient_floors[1]},
-                "complex": {"quality_floor": efficient_floors[2]},
-                "very_complex": {"quality_floor": efficient_floors[3]}
+                "simple": {"quality_floor": cfg.quality_floor.floor_for(TaskKind::General, Complexity::Simple)},
+                "medium": {"quality_floor": cfg.quality_floor.floor_for(TaskKind::General, Complexity::Medium)},
+                "complex": {"quality_floor": cfg.quality_floor.floor_for(TaskKind::General, Complexity::Complex)},
+                "very_complex": {"quality_floor": cfg.quality_floor.floor_for(TaskKind::General, Complexity::VeryComplex)}
             },
-            "routing": build_tier_routes(&tasks, task_filter, &complexities, &efficient_floors, |task, floor| {
+            "routing": build_tier_routes(&tasks, task_filter, &complexities, &cfg.quality_floor, |task, _complexity, floor| {
                 select_efficient_for_tier(&benchmarks, task, floor)
             })
         }));
@@ -1086,12 +1076,12 @@ async fn list_auto_models(
         routes.insert("free".to_owned(), json!({
             "label": "Auto-Free",
             "tiers": {
-                "simple": {"quality_floor": free_floors[0]},
-                "medium": {"quality_floor": free_floors[1]},
-                "complex": {"quality_floor": free_floors[2]},
-                "very_complex": {"quality_floor": free_floors[3]}
+                "simple": {"quality_floor": cfg.free_quality_floor.floor_for(TaskKind::General, Complexity::Simple)},
+                "medium": {"quality_floor": cfg.free_quality_floor.floor_for(TaskKind::General, Complexity::Medium)},
+                "complex": {"quality_floor": cfg.free_quality_floor.floor_for(TaskKind::General, Complexity::Complex)},
+                "very_complex": {"quality_floor": cfg.free_quality_floor.floor_for(TaskKind::General, Complexity::VeryComplex)}
             },
-            "routing": build_tier_routes(&tasks, task_filter, &complexities, &free_floors, |task, floor| {
+            "routing": build_tier_routes(&tasks, task_filter, &complexities, &cfg.free_quality_floor, |task, _complexity, floor| {
                 select_free_for_tier(&free_offerings, &benchmark_map, &state.config.providers, &state.providers, cfg, task, floor)
             })
         }));
@@ -2328,12 +2318,11 @@ async fn resolve_auto_free_targets(
             .push(b.clone());
     }
     let classification = classify(request);
-    let quality_floor = match classification.complexity {
-        Complexity::Simple => state.config.server.free_quality_floor_simple,
-        Complexity::Medium => state.config.server.free_quality_floor_medium,
-        Complexity::Complex => state.config.server.free_quality_floor_complex,
-        Complexity::VeryComplex => state.config.server.free_quality_floor_very_complex,
-    };
+    let quality_floor = state
+        .config
+        .server
+        .free_quality_floor
+        .floor_for(classification.task, classification.complexity);
     let requirements = RequestRequirements::from_request(request);
     let candidates = offerings
         .into_iter()
@@ -2579,32 +2568,11 @@ async fn resolve_benchmark_targets(
         )
     })?;
     let classification = classify(request);
-    let quality_floor = match (policy, classification.complexity) {
-        (BenchmarkPolicy::Efficient, Complexity::Simple) => {
-            state.config.server.quality_floor_simple
-        }
-        (BenchmarkPolicy::Efficient, Complexity::Medium) => {
-            state.config.server.quality_floor_medium
-        }
-        (BenchmarkPolicy::Efficient, Complexity::Complex) => {
-            state.config.server.quality_floor_complex
-        }
-        (BenchmarkPolicy::Efficient, Complexity::VeryComplex) => {
-            state.config.server.quality_floor_very_complex
-        }
-        (BenchmarkPolicy::Frontier, Complexity::Simple) => {
-            state.config.server.frontier_quality_floor_simple
-        }
-        (BenchmarkPolicy::Frontier, Complexity::Medium) => {
-            state.config.server.frontier_quality_floor_medium
-        }
-        (BenchmarkPolicy::Frontier, Complexity::Complex) => {
-            state.config.server.frontier_quality_floor_complex
-        }
-        (BenchmarkPolicy::Frontier, Complexity::VeryComplex) => {
-            state.config.server.frontier_quality_floor_very_complex
-        }
+    let floors = match policy {
+        BenchmarkPolicy::Efficient => &state.config.server.quality_floor,
+        BenchmarkPolicy::Frontier => &state.config.server.frontier_quality_floor,
     };
+    let quality_floor = floors.floor_for(classification.task, classification.complexity);
     let requirements = RequestRequirements::from_request(request);
     let requested_effort = request
         .get("reasoning_effort")
